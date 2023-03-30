@@ -9,3 +9,10 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+tokio-tungstenite = { version = "0.18.0", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
+
+[workspace]
+members = [
+    ".",
+    "testing-project"
+]

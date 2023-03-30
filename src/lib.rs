@@ -13,7 +13,7 @@ mod tests {
     }
 }
 
-enum Message {
+pub enum Message {
     /// A message from the client when it calls a method on the server.
     RPCRequest {
         /// A unique counter for each RPC call.
@@ -46,13 +46,5 @@ enum Message {
         event: Vec<u8>
     }, 
     /// The server updates the connection state.
-    StateChange(StateChange),
-}
-
-enum StateChange {
-    /// A key and value have been inserted into the map.
-    /// The value will differ depending on the application.
-    Insert(String, Vec<u8>),
-    /// A key has been removed from the map. 
-    Remove(String),
+    StateChange(Vec<(String, Vec<u8>)>),
 }

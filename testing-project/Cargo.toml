@@ -1,0 +1,13 @@
+[package]
+name = "testing-project"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1.68"
+bytecheck = { version = "0.6.9", features = ["uuid"] }
+hardlight = { version = "0.1.0", path = ".." }
+rkyv = { version = "0.7.40", features = ["validation", "uuid", "copy", "strict"] }
+tokio = { version = "1.27.0", features = ["full"] }
