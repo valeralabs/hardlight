@@ -12,9 +12,11 @@ use std::{
 };
 use tokio::{
     net::{TcpListener, TcpStream},
+    select,
     sync::mpsc::{self, Sender},
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{
     accept_hdr_async,
     tungstenite::handshake::server::{Request, Response},
@@ -54,7 +56,7 @@ pub enum ServerMessage {
         /// The function's output serialized with rkyv. The format of this
         /// message will differ with each application.
         /// The macros handle generating the code for this.
-        output: Vec<u8>,
+        output: Result<Vec<u8>, RpcHandlerError>,
     },
     /// A message from the server with a new event.
     NewEvent {
@@ -67,7 +69,8 @@ pub enum ServerMessage {
     StateChange(Vec<(String, Vec<u8>)>),
 }
 
-#[derive(Debug)]
+#[derive(Archive, Serialize, Deserialize, Debug)]
+#[archive_attr(derive(CheckBytes))]
 pub enum RpcHandlerError {
     /// The input bytes for the RPC call were invalid.
     BadInputBytes,
@@ -90,7 +93,7 @@ pub trait Handler {
     fn new(state_update_channel: StateUpdateChannel) -> Self
     where
         Self: Sized;
-    async fn handle_rpc_call(&mut self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError>;
+    async fn handle_rpc_call(&self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError>;
 }
 
 pub struct ServerConfig {
@@ -127,7 +130,8 @@ pub const HL_VERSION: &str = version!();
 
 pub struct Server<T>
 where
-    T: Fn(StateUpdateChannel) -> Box<dyn Handler> + Send + Sync + 'static + Copy,
+    T: Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync>,
+    T: Send + Sync + 'static + Copy,
 {
     pub config: ServerConfig,
     pub handler: T,
@@ -135,7 +139,8 @@ where
 
 impl<T> Server<T>
 where
-    T: Fn(StateUpdateChannel) -> Box<dyn Handler> + Send + Sync + 'static + Copy,
+    T: Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync>,
+    T: Send + Sync + 'static + Copy,
 {
     pub fn new(config: ServerConfig, handler: T) -> Self {
         Self { config, handler }
@@ -156,8 +161,9 @@ where
     }
 
     fn handle_connection(&self, stream: TlsStream<TcpStream>, peer_addr: SocketAddr) {
-        let (tx, mut rx) = mpsc::channel(10);
-        let handler = (self.handler)(tx);
+        let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
+        let handler = (self.handler)(state_change_tx);
+        let major_version = self.config.version.major;
         tokio::spawn(async move {
             println!("New connection from {}", peer_addr);
 
@@ -172,7 +178,7 @@ where
                 let headers = response.headers_mut();
                 headers.append(
                     "Sec-WebSocket-Protocol",
-                    format!("hl/{}", self.config.version.major).parse().unwrap(),
+                    format!("hl/{}", major_version).parse().unwrap(),
                 );
 
                 Ok(response)
@@ -182,21 +188,49 @@ where
                 .await
                 .expect("Error during the websocket handshake occurred");
 
-            while let Some(msg) = ws_stream.next().await {
-                let msg = msg.unwrap();
-                if msg.is_binary() {
-                    println!("Server on message: {:?}", &msg);
-                    let binary = msg.into_data();
-                    let msg: ClientMessage = rkyv::from_bytes(&binary).unwrap();
+            // keep track of active RPC calls
+            // let mut active_calls = HashMap::new();
 
-                    match msg {
-                        ClientMessage::RPCRequest { id, internal } => {
-                            handler.handle_rpc_call(&internal).await.unwrap();
+            let (tx, mut rx) = mpsc::channel(u8::MAX as usize);
+
+            let handler = Arc::new(handler);
+
+            loop {
+                select! {
+                    // await new messages from the client
+                    Some(msg) = ws_stream.next() => {
+                        let msg = msg.unwrap();
+                        if msg.is_binary() {
+                            println!("Server on message: {:?}", &msg);
+                            let binary = msg.into_data();
+                            let msg: ClientMessage = rkyv::from_bytes(&binary).unwrap();
+
+                            match msg {
+                                ClientMessage::RPCRequest { id, internal } => {
+                                    let tx = tx.clone();
+                                    let handler = handler.clone();
+                                    tokio::spawn(async move {
+                                        tx.send(
+                                            ServerMessage::RPCResponse {
+                                                id,
+                                                output: handler.handle_rpc_call(&internal).await,
+                                            }
+                                        ).await
+                                    });
+                                }
+                            }
                         }
                     }
-                    
-
-                    ws_stream.send(msg).await.unwrap();
+                    // await responses from RPC calls
+                    Some(msg) = rx.recv() => {
+                        let binary = rkyv::to_bytes::<ServerMessage, 1024>(&msg).unwrap().to_vec();
+                        ws_stream.send(Message::Binary(binary)).await.unwrap();
+                    }
+                    // await state updates from the runtime
+                    Some(state_changes) = state_change_rx.recv() => {
+                        let binary = rkyv::to_bytes::<ServerMessage, 1024>(&ServerMessage::StateChange(state_changes)).unwrap().to_vec();
+                        ws_stream.send(Message::Binary(binary)).await.unwrap();
+                    }
                 }
             }
         });

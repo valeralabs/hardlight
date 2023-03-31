@@ -11,7 +11,8 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), std::io::Error>{
     let config = ServerConfig::new_self_signed("localhost");
     let server = Server::new(config, |state_update_channel| {
         Box::new(CounterHandler::new(state_update_channel))
@@ -33,10 +34,10 @@ struct State {
     counter: u32,
 }
 
-enum Events {
-    Increment(u32),
-    Decrement(u32),
-}
+// enum Events {
+//     Increment(u32),
+//     Decrement(u32),
+// }
 
 // currently implementing everything manually to work out what functionality
 // the macros will need to provide
@@ -79,7 +80,7 @@ impl Handler for CounterHandler {
         }
     }
 
-    async fn handle_rpc_call(&mut self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError> {
+    async fn handle_rpc_call(&self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError> {
         let call: RpcCall = rkyv::from_bytes(input).map_err(|_| RpcHandlerError::BadInputBytes)?;
 
         match call.method {
@@ -224,7 +225,7 @@ impl DerefMut for StateGuard<'_> {
 }
 
 // RPC client that implements the Counter trait
-struct Client {}
+// struct Client {}
 
 // we need to be able to serialise and deserialise the method enum
 // so we can match it on the server side
