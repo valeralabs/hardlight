@@ -9,5 +9,5 @@ edition = "2021"
 async-trait = "0.1.68"
 bytecheck = { version = "0.6.9", features = ["uuid"] }
 hardlight = { version = "0.1.0", path = ".." }
-rkyv = { version = "0.7.40", features = ["validation", "uuid", "copy", "strict"] }
+rkyv = { version = "0.7.40", features = ["validation", "uuid", "copy"] }
 tokio = { version = "1.27.0", features = ["full"] }

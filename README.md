@@ -5,9 +5,9 @@ A secure, real-time, low-latency binary WebSocket RPC subprotocol.
 HardLight has two data models:
 
 - RPC: a client connects to a server, and can call functions on the server
-- Subscriptions: a client connects to a server, and can subscribe to events from the server
+- Events: the server can push events of specified types to clients
 
-An example: multiple clients subscribe to a "chat" event using Subscriptions. Clients use an RPC function `send_message` to send a message, which will then persisted by the server and sent to all clients subscribed to the "chat" event.
+An example: multiple clients subscribe to a "chat" event using Events. The connection state holds user info and what chat threads the user wants events for. Clients use an RPC function `send_message` to send a message, which will then persisted by the server and sent to subscribed clients.
 
 HardLight is named after the fictional [Forerunner technology](https://www.halopedia.org/Hard_light) that "allows light to be transformed into a solid state, capable of bearing weight and performing a variety of tasks".
 
@@ -20,6 +20,12 @@ While there isn't an official "specification", we take a similar approach to Bit
 - **Concurrent RPC**: up to 256 RPC calls can be occuring at the same time on a single connection
   - This doesn't include subscriptions, for which there are no hard limits
 - **Subscriptions**: the server can push events to clients
+
+## Install
+
+```shell
+cargo add hardlight
+```
 
 ## Why WebSockets?
 
@@ -35,12 +41,6 @@ WebSockets actually have very little abstraction over a TCP stream. From [RFC645
 In effect, we gain the benefits of TLS, wide adoption & firewall support (it runs alongside HTTPS on TCP 443) while having little downsides. This means HardLight is usable in browsers, which was a requirement we had for the framework. In fact, we officially support using HardLight from browsers using the "wasm" feature.
 
 At Valera, we use HardLight to connect clients to our servers, and for connecting some of our services to each another.
-
-## Install
-
-```shell
-cargo add hardlight
-```
 
 ## Usage
 
@@ -118,29 +118,29 @@ You then `impl Counter for Handler` to add your functionality. For example:
 impl Counter for Handler {
     async fn increment(&self, amount: u32) -> u32 {
         // lock the state to the current thread
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap();
         state.counter += amount;
         counter
     } // state is automatically unlocked here; any changes are sent to the client automagically ✨
 
     async fn decrement(&self, amount: u32) -> u32 {
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap();
         state.counter -= amount;
         counter
     }
 
     async fn get(&self) -> u32 {
-        let state = self.state.lock();
+        let state = self.state.lock().unwrap();
         state.counter
     }
 }
 ```
 
-## Subscriptions
+## Events
 
-Subscriptions are a little different from other subscription models like GraphQL. Instead of the client setting up subscriptions to topics, you define the types of events that can be sent over HardLight connections. The server decides what and when to send events to clients, normally based on the connection state. This logic is handled by your app, not HardLight itself. 
+Events are a little different from other subscription models like GraphQL. Instead of the client setting up subscriptions to topics, you define the types of events that can be sent over HardLight connections. The server decides what and when to send events to clients, normally based on the connection state. For example a client might specify what chat threads its subscribed to, or what financial accounts it wants realtime transactions for. This logic is handled by your app, not HardLight itself.
 
-Other than that, subscriptions use a event-based interface. You attach handlers for each message type in the client.
+You attach handlers for each message type in the client.
 
 Our general (conceptual) architecture at Valera looks like:
 
@@ -150,3 +150,5 @@ UI <> Logic <> State <-------------> Logic <> State
 ```
 
 We provide handlers to HardLight that modify state inside the frontend. The UI logic then updates the UI layer based on the state.
+
+```rs

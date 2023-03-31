@@ -9,7 +9,16 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-trait = "0.1.68"
+tokio = { version = "1.27.0", features = ["full"] }
 tokio-tungstenite = { version = "0.18.0", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
+rkyv = { version = "0.7.40", features = ["validation", "uuid", "copy"] }
+bytecheck = { version = "0.6.9", features = ["uuid"] }
+rustls = { version = "0.21.0", default-features = false, features = ["log", "logging"] }
+version = "3.0.0"
+tokio-rustls = { version = "0.24.0", default-features = false, features = ["logging"] }
+rcgen = { version = "0.10.0", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [workspace]
 members = [

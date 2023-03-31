@@ -1,8 +1,8 @@
 // have to use this as rust doesn't have a stablised feature in nightly yet
 // see: https://github.com/rust-lang/rust/issues/91611
 use async_trait::async_trait;
-use bytecheck::CheckBytes;
-use rkyv::{Archive, Deserialize, Serialize};
+use hardlight::{Handler, HandlerResult, RpcHandlerError, ServerConfig, StateUpdateChannel, Server};
+use rkyv::{Archive, Deserialize, Serialize, CheckBytes};
 use tokio::sync::mpsc::Sender;
 
 use std::{
@@ -12,19 +12,30 @@ use std::{
 };
 
 fn main() {
-    println!("Hello, world!");
+    let config = ServerConfig::new_self_signed("localhost");
+    let server = Server::new(config, |state_update_channel| {
+        Box::new(CounterHandler::new(state_update_channel))
+    });
+
+    server.run().await
 }
 
 #[async_trait]
 trait Counter {
-    async fn increment(&self, amount: u32) -> u32;
-    async fn decrement(&self, amount: u32) -> u32;
-    async fn get(&self) -> u32;
+    async fn increment(&self, amount: u32) -> HandlerResult<u32>;
+    async fn decrement(&self, amount: u32) -> HandlerResult<u32>;
+    // We'll deprecate this at some point as we can just send it using Events
+    async fn get(&self) -> HandlerResult<u32>;
 }
 
 #[derive(Clone)]
 struct State {
     counter: u32,
+}
+
+enum Events {
+    Increment(u32),
+    Decrement(u32),
 }
 
 // currently implementing everything manually to work out what functionality
@@ -34,20 +45,12 @@ struct State {
 // along but no macros for time being
 
 // RPC server that implements the Counter trait
-struct Handler {
-    state: CounterConnectionState,
+struct CounterHandler {
+    // the runtime will provide the state when it creates the handler
+    state: Arc<CounterConnectionState>,
 }
 
-enum Error {
-    BadInputBytes,
-}
-
-#[derive(Archive, Serialize, Deserialize)]
-#[archive_attr(derive(CheckBytes))]
-struct RpcCall {
-    method: Method,
-    args: Vec<u8>,
-}
+// generated argument structs
 
 #[derive(Archive, Serialize, Deserialize)]
 #[archive_attr(derive(CheckBytes))]
@@ -61,30 +64,41 @@ struct DecrementArgs {
     amount: u32,
 }
 
-impl Handler {
-    async fn handle_rpc_call(&mut self, input: &[u8]) -> Result<Vec<u8>, Error> {
-        let call: RpcCall = match rkyv::from_bytes(input) {
-            Ok(call) => call,
-            Err(_) => return Err(Error::BadInputBytes),
-        };
+#[derive(Archive, Serialize, Deserialize)]
+#[archive_attr(derive(CheckBytes))]
+struct RpcCall {
+    method: Method,
+    args: Vec<u8>,
+}
+
+#[async_trait]
+impl Handler for CounterHandler {
+    fn new(state_update_channel: StateUpdateChannel) -> Self {
+        Self {
+            state: Arc::new(CounterConnectionState::new(state_update_channel)),
+        }
+    }
+
+    async fn handle_rpc_call(&mut self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError> {
+        let call: RpcCall = rkyv::from_bytes(input).map_err(|_| RpcHandlerError::BadInputBytes)?;
 
         match call.method {
             Method::Increment => {
                 let args: IncrementArgs =
-                    rkyv::from_bytes(&call.args).map_err(|_| Error::BadInputBytes)?;
-                let result = self.increment(args.amount).await;
+                    rkyv::from_bytes(&call.args).map_err(|_| RpcHandlerError::BadInputBytes)?;
+                let result = self.increment(args.amount).await?;
                 let result = rkyv::to_bytes::<u32, 1024>(&result).unwrap();
                 Ok(result.to_vec())
             }
             Method::Decrement => {
                 let args: DecrementArgs =
-                    rkyv::from_bytes(&call.args).map_err(|_| Error::BadInputBytes)?;
-                let result = self.decrement(args.amount).await;
+                    rkyv::from_bytes(&call.args).map_err(|_| RpcHandlerError::BadInputBytes)?;
+                let result = self.decrement(args.amount).await?;
                 let result = rkyv::to_bytes::<u32, 1024>(&result).unwrap();
                 Ok(result.to_vec())
             }
             Method::Get => {
-                let result = self.get().await;
+                let result = self.get().await?;
                 let result = rkyv::to_bytes::<u32, 1024>(&result).unwrap();
                 Ok(result.to_vec())
             }
@@ -93,30 +107,25 @@ impl Handler {
 }
 
 #[async_trait]
-impl Counter for Handler {
-    async fn increment(&self, amount: u32) -> u32 {
+impl Counter for CounterHandler {
+    async fn increment(&self, amount: u32) -> HandlerResult<u32> {
         // lock the state to the current thread
-        let mut state = self.state.lock().unwrap();
+        let mut state: StateGuard = self.state.lock()?;
         state.counter += amount;
-        state.counter
+        Ok(state.counter)
     } // state is automatically unlocked here; any changes are sent to the client
       // automagically ✨
 
-    async fn decrement(&self, amount: u32) -> u32 {
-        let mut state = self.state.lock().unwrap();
+    async fn decrement(&self, amount: u32) -> HandlerResult<u32> {
+        let mut state = self.state.lock()?;
         state.counter -= amount;
-        state.counter
+        Ok(state.counter)
     }
 
-    async fn get(&self) -> u32 {
-        let state = self.state.lock().unwrap();
-        state.counter
+    async fn get(&self) -> HandlerResult<u32> {
+        let state = self.state.lock()?;
+        Ok(state.counter)
     }
-}
-
-#[derive(Debug)]
-enum ConnectionStateError {
-    Poisoned,
 }
 
 /// ConnectionState is a wrapper around the user's state that will be the
@@ -131,13 +140,8 @@ struct CounterConnectionState {
     channel: Arc<Sender<Vec<(String, Vec<u8>)>>>,
 }
 
-trait ConnectionState {
-    fn new(channel: Sender<Vec<(String, Vec<u8>)>>) -> Self;
-    fn lock(&self) -> Result<StateGuard, ConnectionStateError>;
-}
-
-impl ConnectionState for CounterConnectionState {
-    fn new(channel: Sender<Vec<(String, Vec<u8>)>>) -> Self {
+impl CounterConnectionState {
+    fn new(channel: StateUpdateChannel) -> Self {
         Self {
             // use default values for the state
             state: Mutex::new(State {
@@ -149,20 +153,20 @@ impl ConnectionState for CounterConnectionState {
 
     /// locks the state to the current thread by providing a StateGuard
     /// the StateGuard gets
-    fn lock(&self) -> Result<StateGuard, ConnectionStateError> {
+    fn lock(&self) -> Result<StateGuard, RpcHandlerError> {
         match self.state.lock() {
             Ok(state) => Ok(StateGuard {
                 starting_state: state.clone(),
                 state,
                 channel: self.channel.clone(),
             }),
-            Err(_) => Err(ConnectionStateError::Poisoned),
+            Err(_) => Err(RpcHandlerError::StatePoisoned),
         }
     }
 }
 
 /// StateGuard is effectively a MutexGuard that sends any changes back to the
-/// runtime when it's dropped
+/// runtime when it's dropped. We have to generate it in a custom way because
 struct StateGuard<'a> {
     /// The StateGuard is given ownership of a lock to the state
     state: MutexGuard<'a, State>,
