@@ -3,6 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use rcgen::generate_simple_self_signed;
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use rustls::{Certificate, PrivateKey, ServerConfig as TLSConfig};
+use tracing::info;
 use std::{
     io,
     marker::{Send, Sync},
@@ -96,6 +97,7 @@ pub trait Handler {
     async fn handle_rpc_call(&self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError>;
 }
 
+#[derive(Debug)]
 pub struct ServerConfig {
     pub address: String,
     pub version: Version,
@@ -147,8 +149,10 @@ where
     }
 
     pub async fn run(&self) -> io::Result<()> {
+        info!("Booting HL server v{}...", HL_VERSION);
         let acceptor = TlsAcceptor::from(Arc::new(self.config.tls.clone()));
         let listener = TcpListener::bind(&self.config.address).await?;
+        info!("Listening on {} with TLS", self.config.address);
 
         loop {
             let (stream, peer_addr) = listener.accept().await?;

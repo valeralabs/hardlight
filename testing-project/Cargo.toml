@@ -11,3 +11,5 @@ bytecheck = { version = "0.6.9", features = ["uuid"] }
 hardlight = { version = "0.1.0", path = ".." }
 rkyv = { version = "0.7.40", features = ["validation", "uuid", "copy"] }
 tokio = { version = "1.27.0", features = ["full"] }
+tracing = "0.1.37"
+tracing-subscriber = "0.3.16"

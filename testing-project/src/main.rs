@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use hardlight::{Handler, HandlerResult, RpcHandlerError, ServerConfig, StateUpdateChannel, Server};
 use rkyv::{Archive, Deserialize, Serialize, CheckBytes};
 use tokio::sync::mpsc::Sender;
+use tracing::info;
 
 use std::{
     default,
@@ -13,7 +14,11 @@ use std::{
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error>{
-    let config = ServerConfig::new_self_signed("localhost");
+    tracing_subscriber::fmt::init();
+
+    info!("Starting server on localhost:8080");
+    let config = ServerConfig::new_self_signed("localhost:8080");
+    info!("Config: {:?}", config);
     let server = Server::new(config, |state_update_channel| {
         Box::new(CounterHandler::new(state_update_channel))
     });
