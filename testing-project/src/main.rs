@@ -3,10 +3,9 @@
 use async_trait::async_trait;
 use bytecheck::CheckBytes;
 use rkyv::{Archive, Deserialize, Serialize};
-use hardlight::Message;
 use tokio::sync::mpsc::Sender;
 
-use std::sync::{Mutex, MutexGuard};
+use std::{sync::{Mutex, MutexGuard, Arc}, ops::{Deref, DerefMut}, default};
 
 fn main() {
     println!("Hello, world!");
@@ -32,7 +31,7 @@ struct State {
 
 // RPC server that implements the Counter trait
 struct Handler {
-    state: ConnectionState,
+    state: CounterConnectionState,
 }
 
 enum Error {
@@ -97,7 +96,7 @@ impl Handler {
 impl Counter for Handler {
     async fn increment(&self, amount: u32) -> u32 {
         // lock the state to the current thread
-        let mut state = self.state.lock().unwrap().state;
+        let mut state = self.state.lock().unwrap();
         state.counter += amount;
         state.counter
     } // state is automatically unlocked here; any changes are sent to the client automagically ✨
@@ -114,46 +113,68 @@ impl Counter for Handler {
     }
 }
 
-// self.state is a ConnectionState<State>, which is a wrapper around a MutexGuard<State>
-// self.state.lock() returns a StateGuard<State>, which is a wrapper around a MutexGuard<State>
-// we do this so we can do custom logic when the StateGuard is dropped
 
 #[derive(Debug)]
 enum ConnectionStateError {
     Poisoned,
 }
 
-// A wrapper around a mutex of the state which allows us to send changes to the client
-struct ConnectionState
+/// ConnectionState is a wrapper around the user's state that will be the "owner" of a connection's state
+struct CounterConnectionState
 {
+    /// State is locked under an internal mutex so multiple threads can use it safely
     state: Mutex<State>,
+    /// The channel is given by the runtime when it creates the connection, allowing us to tell the runtime when the connection's state is modified so it can send the changes to the client automatically
+    channel: Arc<Sender<Vec<(String, Vec<u8>)>>>,
 }
 
-impl ConnectionState
+trait ConnectionState {
+    fn new(channel: Sender<Vec<(String, Vec<u8>)>>) -> Self;
+    fn lock(&self) -> Result<StateGuard, ConnectionStateError>;
+}
+
+impl ConnectionState for CounterConnectionState
 {
+    fn new(channel: Sender<Vec<(String, Vec<u8>)>>) -> Self {
+        Self {
+            // use default values for the state
+            state: Mutex::new(State {
+                counter: default::Default::default(),
+            }),
+            channel: Arc::new(channel),
+        }
+    }
+
+    /// locks the state to the current thread by providing a StateGuard
+    /// the StateGuard gets
     fn lock(&self) -> Result<StateGuard, ConnectionStateError> {
         match self.state.lock() {
             Ok(state) => Ok(StateGuard {
-                state,
                 starting_state: state.clone(),
+                state,
+                channel: self.channel.clone(),
             }),
-            Err(e) => Err(ConnectionStateError::Poisoned),
+            Err(_) => Err(ConnectionStateError::Poisoned),
         }
     }
 }
 
+/// StateGuard is effectively a MutexGuard that sends any changes back to the runtime when it's dropped
 struct StateGuard<'a> {
+    /// The StateGuard is given ownership of a lock to the state
     state: MutexGuard<'a, State>,
+    /// A copy of the state before we locked it
+    /// We use this to compare changes when the StateGuard is dropped
     starting_state: State,
-    channel: Sender<Vec<(String, Vec<u8>)>>,
+    /// A channel pointer that we can use to send changes to the runtime
+    /// which will handle sending them to the client
+    channel: Arc<Sender<Vec<(String, Vec<u8>)>>>,
 }
 
 impl<'a> Drop for StateGuard<'a> {
+    /// Our custom drop implementation will send any changes to the runtime
     fn drop(&mut self) {
-        // we compare the starting state to the current state
-        // if they're different, we send the changed fields to the client
-        // if they're the same, we don't do anything
-
+        // "diff" the two states to see what changed
         let mut changes = Vec::new();
 
         if self.state.counter != self.starting_state.counter {
@@ -163,9 +184,32 @@ impl<'a> Drop for StateGuard<'a> {
             ));
         }
 
-        // we need to somehow send this back to the runtime (??)
-        // maybe an  
-        self.channel.send(changes).await.unwrap();
+        // if there are no changes, don't bother sending anything
+        if changes.is_empty() {
+            return;
+        }
+
+        // send the changes to the runtime
+        // we have to spawn a new task because we can't await inside a drop
+        let channel = self.channel.clone();
+        tokio::spawn(async move {
+            channel.send(changes).await.unwrap();
+        });
+    }
+}
+
+// the Deref and DerefMut traits allow us to use the StateGuard as if it were a State (e.g. state.counter instead of state.state.counter)
+impl Deref for StateGuard<'_> {
+    type Target = State;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl DerefMut for StateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
     }
 }
 
