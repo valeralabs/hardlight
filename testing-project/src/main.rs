@@ -5,7 +5,11 @@ use bytecheck::CheckBytes;
 use rkyv::{Archive, Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 
-use std::{sync::{Mutex, MutexGuard, Arc}, ops::{Deref, DerefMut}, default};
+use std::{
+    default,
+    ops::{Deref, DerefMut},
+    sync::{Arc, Mutex, MutexGuard},
+};
 
 fn main() {
     println!("Hello, world!");
@@ -26,8 +30,8 @@ struct State {
 // currently implementing everything manually to work out what functionality
 // the macros will need to provide
 
-// runtime and stuff we can put in the root project and keep those as we move along
-// but no macros for time being
+// runtime and stuff we can put in the root project and keep those as we move
+// along but no macros for time being
 
 // RPC server that implements the Counter trait
 struct Handler {
@@ -66,19 +70,15 @@ impl Handler {
 
         match call.method {
             Method::Increment => {
-                let args: IncrementArgs = match rkyv::from_bytes(&call.args) {
-                    Ok(args) => args,
-                    Err(_) => return Err(Error::BadInputBytes),
-                };
+                let args: IncrementArgs =
+                    rkyv::from_bytes(&call.args).map_err(|_| Error::BadInputBytes)?;
                 let result = self.increment(args.amount).await;
                 let result = rkyv::to_bytes::<u32, 1024>(&result).unwrap();
                 Ok(result.to_vec())
             }
             Method::Decrement => {
-                let args: DecrementArgs = match rkyv::from_bytes(&call.args) {
-                    Ok(args) => args,
-                    Err(_) => return Err(Error::BadInputBytes),
-                };
+                let args: DecrementArgs =
+                    rkyv::from_bytes(&call.args).map_err(|_| Error::BadInputBytes)?;
                 let result = self.decrement(args.amount).await;
                 let result = rkyv::to_bytes::<u32, 1024>(&result).unwrap();
                 Ok(result.to_vec())
@@ -99,7 +99,8 @@ impl Counter for Handler {
         let mut state = self.state.lock().unwrap();
         state.counter += amount;
         state.counter
-    } // state is automatically unlocked here; any changes are sent to the client automagically ✨
+    } // state is automatically unlocked here; any changes are sent to the client
+      // automagically ✨
 
     async fn decrement(&self, amount: u32) -> u32 {
         let mut state = self.state.lock().unwrap();
@@ -113,18 +114,20 @@ impl Counter for Handler {
     }
 }
 
-
 #[derive(Debug)]
 enum ConnectionStateError {
     Poisoned,
 }
 
-/// ConnectionState is a wrapper around the user's state that will be the "owner" of a connection's state
-struct CounterConnectionState
-{
-    /// State is locked under an internal mutex so multiple threads can use it safely
+/// ConnectionState is a wrapper around the user's state that will be the
+/// "owner" of a connection's state
+struct CounterConnectionState {
+    /// State is locked under an internal mutex so multiple threads can use it
+    /// safely
     state: Mutex<State>,
-    /// The channel is given by the runtime when it creates the connection, allowing us to tell the runtime when the connection's state is modified so it can send the changes to the client automatically
+    /// The channel is given by the runtime when it creates the connection,
+    /// allowing us to tell the runtime when the connection's state is modified
+    /// so it can send the changes to the client automatically
     channel: Arc<Sender<Vec<(String, Vec<u8>)>>>,
 }
 
@@ -133,8 +136,7 @@ trait ConnectionState {
     fn lock(&self) -> Result<StateGuard, ConnectionStateError>;
 }
 
-impl ConnectionState for CounterConnectionState
-{
+impl ConnectionState for CounterConnectionState {
     fn new(channel: Sender<Vec<(String, Vec<u8>)>>) -> Self {
         Self {
             // use default values for the state
@@ -159,7 +161,8 @@ impl ConnectionState for CounterConnectionState
     }
 }
 
-/// StateGuard is effectively a MutexGuard that sends any changes back to the runtime when it's dropped
+/// StateGuard is effectively a MutexGuard that sends any changes back to the
+/// runtime when it's dropped
 struct StateGuard<'a> {
     /// The StateGuard is given ownership of a lock to the state
     state: MutexGuard<'a, State>,
@@ -180,7 +183,9 @@ impl<'a> Drop for StateGuard<'a> {
         if self.state.counter != self.starting_state.counter {
             changes.push((
                 "counter".to_string(),
-                rkyv::to_bytes::<u32, 1024>(&self.state.counter).unwrap().to_vec(),
+                rkyv::to_bytes::<u32, 1024>(&self.state.counter)
+                    .unwrap()
+                    .to_vec(),
             ));
         }
 
@@ -198,7 +203,8 @@ impl<'a> Drop for StateGuard<'a> {
     }
 }
 
-// the Deref and DerefMut traits allow us to use the StateGuard as if it were a State (e.g. state.counter instead of state.state.counter)
+// the Deref and DerefMut traits allow us to use the StateGuard as if it were a
+// State (e.g. state.counter instead of state.state.counter)
 impl Deref for StateGuard<'_> {
     type Target = State;
 
