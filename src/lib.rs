@@ -194,7 +194,6 @@ where
                             handler.handle_rpc_call(&internal).await.unwrap();
                         }
                     }
-                    
 
                     ws_stream.send(msg).await.unwrap();
                 }
