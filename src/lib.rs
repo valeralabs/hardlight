@@ -215,7 +215,7 @@ where
             let mut ws_stream = match accept_hdr_async(stream, callback).await {
                 Ok(ws_stream) => ws_stream,
                 Err(e) => {
-                    error!("Error accepting connection from {}: {}", peer_addr, e);
+                    warn!("Error accepting connection from {}: {}", peer_addr, e);
                     return;
                 }
             };
