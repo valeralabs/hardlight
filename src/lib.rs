@@ -91,10 +91,16 @@ pub type HandlerResult<T> = Result<T, RpcHandlerError>;
 /// These are user-defined structs that respond to RPC calls
 #[async_trait]
 pub trait Handler {
+    /// Create a new handler using the given state update channel.
     fn new(state_update_channel: StateUpdateChannel) -> Self
     where
         Self: Sized;
+    /// Handle an RPC call (method + arguments) from the client.
     async fn handle_rpc_call(&self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError>;
+    // An easy way to get the handler factory.
+    // Currently disabled because we can't use impl Trait in traits yet. (https://github.com/rust-lang/rust/issues/91611)
+    // fn init() -> impl Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync> +
+    // Send + Sync + 'static + Copy;
 }
 
 #[derive(Debug)]
