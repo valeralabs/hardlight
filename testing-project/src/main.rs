@@ -1,8 +1,10 @@
 // have to use this as rust doesn't have a stablised feature in nightly yet
 // see: https://github.com/rust-lang/rust/issues/91611
 use async_trait::async_trait;
-use hardlight::{Handler, HandlerResult, RpcHandlerError, ServerConfig, StateUpdateChannel, Server};
-use rkyv::{Archive, Deserialize, Serialize, CheckBytes};
+use hardlight::{
+    Handler, HandlerResult, RpcHandlerError, Server, ServerConfig, StateUpdateChannel,
+};
+use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 use tracing::info;
 
@@ -13,15 +15,13 @@ use std::{
 };
 
 #[tokio::main]
-async fn main() -> Result<(), std::io::Error>{
+async fn main() -> Result<(), std::io::Error> {
     tracing_subscriber::fmt::init();
 
     info!("Starting server on localhost:8080");
     let config = ServerConfig::new_self_signed("localhost:8080");
     info!("Config: {:?}", config);
-    let server = Server::new(config, |state_update_channel| {
-        Box::new(CounterHandler::new(state_update_channel))
-    });
+    let server = Server::new(config, CounterHandler::init());
 
     server.run().await
 }
@@ -54,6 +54,14 @@ struct State {
 struct CounterHandler {
     // the runtime will provide the state when it creates the handler
     state: Arc<CounterConnectionState>,
+}
+
+impl CounterHandler {
+    fn init(
+    ) -> impl Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync> + Send + Sync + 'static + Copy
+    {
+        |state_update_channel| Box::new(Self::new(state_update_channel))
+    }
 }
 
 // generated argument structs

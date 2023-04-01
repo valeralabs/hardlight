@@ -3,7 +3,6 @@ use futures_util::{SinkExt, StreamExt};
 use rcgen::generate_simple_self_signed;
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use rustls::{Certificate, PrivateKey, ServerConfig as TLSConfig};
-use tracing::info;
 use std::{
     io,
     marker::{Send, Sync},
@@ -17,11 +16,15 @@ use tokio::{
     sync::mpsc::{self, Sender},
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{
+    http::{HeaderValue, StatusCode},
+    Message,
+};
 use tokio_tungstenite::{
     accept_hdr_async,
     tungstenite::handshake::server::{Request, Response},
 };
+use tracing::{info, trace, warn, span, Level};
 use version::{version, Version};
 
 #[derive(Archive, Serialize, Deserialize)]
@@ -91,10 +94,16 @@ pub type HandlerResult<T> = Result<T, RpcHandlerError>;
 /// These are user-defined structs that respond to RPC calls
 #[async_trait]
 pub trait Handler {
+    /// Create a new handler using the given state update channel.
     fn new(state_update_channel: StateUpdateChannel) -> Self
     where
         Self: Sized;
+    /// Handle an RPC call (method + arguments) from the client.
     async fn handle_rpc_call(&self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError>;
+    // An easy way to get the handler factory.
+    // Currently disabled because we can't use impl Trait in traits yet. (https://github.com/rust-lang/rust/issues/91611)
+    // fn init() -> impl Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync> +
+    // Send + Sync + 'static + Copy;
 }
 
 #[derive(Debug)]
@@ -130,13 +139,19 @@ impl ServerConfig {
 
 pub const HL_VERSION: &str = version!();
 
+/// The HardLight server, using tokio & tungstenite.
 pub struct Server<T>
 where
     T: Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync>,
     T: Send + Sync + 'static + Copy,
 {
+    /// The server's configuration.
     pub config: ServerConfig,
-    pub handler: T,
+    /// A closure that creates a new handler for each connection.
+    /// The closure is passed a [StateUpdateChannel] that the handler can use to
+    /// send state updates to the runtime.
+    pub factory: T,
+    pub hl_version_string: HeaderValue,
 }
 
 impl<T> Server<T>
@@ -144,8 +159,12 @@ where
     T: Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync>,
     T: Send + Sync + 'static + Copy,
 {
-    pub fn new(config: ServerConfig, handler: T) -> Self {
-        Self { config, handler }
+    pub fn new(config: ServerConfig, factory: T) -> Self {
+        Self {
+            hl_version_string: format!("hl/{}", config.version.major).parse().unwrap(),
+            config,
+            factory,
+        }
     }
 
     pub async fn run(&self) -> io::Result<()> {
@@ -159,6 +178,7 @@ where
             let acceptor = acceptor.clone();
 
             if let Ok(stream) = acceptor.accept(stream).await {
+                trace!("Terminated TLS handshake with {}", peer_addr);
                 self.handle_connection(stream, peer_addr);
             }
         }
@@ -166,36 +186,44 @@ where
 
     fn handle_connection(&self, stream: TlsStream<TcpStream>, peer_addr: SocketAddr) {
         let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
-        let handler = (self.handler)(state_change_tx);
-        let major_version = self.config.version.major;
+        let handler = (self.factory)(state_change_tx);
+        let version: HeaderValue = self.hl_version_string.clone();
         tokio::spawn(async move {
+            let span = span!(Level::TRACE, "connection", peer_addr = %peer_addr);
+            let _enter = span.enter();
             println!("New connection from {}", peer_addr);
 
             let callback = |req: &Request, mut response: Response| {
-                println!("Received a new ws handshake");
-                println!("The request's path is: {}", req.uri().path());
-                println!("The request's headers are:");
-                for (ref header, _value) in req.headers() {
-                    println!("* {}: {:?}", header, _value);
+                // request is only valid if req.headers().get("Sec-WebSocket-Protocol") is
+                // Some(req_version) AND req_version == version
+                let req_version = req.headers().get("Sec-WebSocket-Protocol");
+                if req_version.is_none() || req_version.unwrap() != &version {
+                    *response.status_mut() = StatusCode::BAD_REQUEST;
+                    warn!("Invalid request from {}, version mismatch (client gave {:?}, server wanted {:?})", peer_addr, req_version, Some(version));
+                    return Ok(response);
+                } else {
+                    let headers = response.headers_mut();
+                    headers.append("Sec-WebSocket-Protocol", version);
+                    trace!(
+                        "Received valid handshake from {}, upgrading connection",
+                        peer_addr
+                    );
+                    Ok(response)
                 }
-
-                let headers = response.headers_mut();
-                headers.append(
-                    "Sec-WebSocket-Protocol",
-                    format!("hl/{}", major_version).parse().unwrap(),
-                );
-
-                Ok(response)
             };
 
-            let mut ws_stream = accept_hdr_async(stream, callback)
-                .await
-                .expect("Error during the websocket handshake occurred");
+            let mut ws_stream = match accept_hdr_async(stream, callback).await {
+                Ok(ws_stream) => ws_stream,
+                Err(e) => {
+                    warn!("Error accepting connection from {}: {}", peer_addr, e);
+                    return;
+                }
+            };
 
             // keep track of active RPC calls
-            // let mut active_calls = HashMap::new();
+            let mut in_flight = [false; u8::MAX as usize];
 
-            let (tx, mut rx) = mpsc::channel(u8::MAX as usize);
+            let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize);
 
             let handler = Arc::new(handler);
 
@@ -211,8 +239,14 @@ where
 
                             match msg {
                                 ClientMessage::RPCRequest { id, internal } => {
-                                    let tx = tx.clone();
+                                    if in_flight[id as usize] {
+                                        warn!("RPC call {id} already in flight. Ignoring.");
+                                        continue;
+                                    }
+
+                                    let tx = rpc_tx.clone();
                                     let handler = handler.clone();
+                                    in_flight[id as usize] = true;
                                     tokio::spawn(async move {
                                         tx.send(
                                             ServerMessage::RPCResponse {
@@ -226,9 +260,16 @@ where
                         }
                     }
                     // await responses from RPC calls
-                    Some(msg) = rx.recv() => {
+                    Some(msg) = rpc_rx.recv() => {
+                        let id = match msg {
+                            ServerMessage::RPCResponse { id, .. } => id,
+                            _ => unreachable!(),
+                        };
+                        in_flight[id as usize] = false;
+                        trace!("RPC call {id} finished. Serializing and sending response...");
                         let binary = rkyv::to_bytes::<ServerMessage, 1024>(&msg).unwrap().to_vec();
                         ws_stream.send(Message::Binary(binary)).await.unwrap();
+                        trace!("RPC call {id} response sent.");
                     }
                     // await state updates from the runtime
                     Some(state_changes) = state_change_rx.recv() => {
