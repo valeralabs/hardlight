@@ -37,13 +37,13 @@ async fn main() -> Result<(), std::io::Error> {
     client.connect().await;
 
     let first_value = client.get().await.expect("get failed");
-    info!("Incrementing counter using 10 tasks with 100 increments each");
+    info!("Incrementing counter using 100 tasks with 100 increments each");
     info!("First value: {}", first_value);
 
     let counter = Arc::new(client);
 
     let mut tasks = Vec::new();
-    for _ in 0..10 {
+    for _ in 0..100 {
         let counter = counter.clone();
         tasks.push(tokio::spawn(async move {
             for _ in 0..100 {
@@ -61,7 +61,7 @@ async fn main() -> Result<(), std::io::Error> {
     info!("Final value: {}", final_value);
 
     // make sure server-side mutex is working...
-    assert!(final_value == first_value + 1000);
+    assert!(final_value == first_value + 10000);
 
     Ok(())
 }
