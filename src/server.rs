@@ -1,15 +1,30 @@
-use std::{str::FromStr, io, sync::Arc, net::SocketAddr};
+use std::{io, net::SocketAddr, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
-use futures_util::{StreamExt, SinkExt};
+use futures_util::{SinkExt, StreamExt};
 use rcgen::generate_simple_self_signed;
-use tokio::{sync::mpsc, net::{TcpListener, TcpStream}, select};
-use tokio_tungstenite::{tungstenite::{http::{HeaderValue, StatusCode}, handshake::server::{Response, Request}, Message}, accept_hdr_async};
-use tracing::{info, debug, span, Level, warn};
-use version::{Version, version};
-use tokio_rustls::{rustls::{ServerConfig as TLSServerConfig, Certificate, PrivateKey}, TlsAcceptor, server::TlsStream};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    select,
+    sync::mpsc,
+};
+use tokio_rustls::{
+    rustls::{Certificate, PrivateKey, ServerConfig as TLSServerConfig},
+    server::TlsStream,
+    TlsAcceptor,
+};
+use tokio_tungstenite::{
+    accept_hdr_async,
+    tungstenite::{
+        handshake::server::{Request, Response},
+        http::{HeaderValue, StatusCode},
+        Message,
+    },
+};
+use tracing::{debug, info, span, warn, Level};
+use version::{version, Version};
 
-use crate::wire::{RpcHandlerError, ClientMessage, ServerMessage};
+use crate::wire::{ClientMessage, RpcHandlerError, ServerMessage};
 
 /// A tokio MPSC channel that is used to send state updates to the runtime.
 /// The runtime will then send these updates to the client.
@@ -102,10 +117,12 @@ where
 
         loop {
             let (stream, peer_addr) = listener.accept().await?;
+            let span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
+            let _enter = span.enter();
             let acceptor = acceptor.clone();
 
             if let Ok(stream) = acceptor.accept(stream).await {
-                debug!("Successfully terminated TLS handshake with {}", peer_addr);
+                debug!("Successfully terminated TLS handshake");
                 self.handle_connection(stream, peer_addr);
             }
         }
@@ -160,19 +177,28 @@ where
                 select! {
                     // await new messages from the client
                     Some(msg) = ws_stream.next() => {
-                        let msg = msg.unwrap();
+                        let msg = match msg {
+                            Ok(msg) => msg,
+                            Err(e) => {
+                                warn!("Error receiving message from client: {}", e);
+                                continue;
+                            }
+                        };
                         if msg.is_binary() {
                             let binary = msg.into_data();
                             let msg: ClientMessage = rkyv::from_bytes(&binary).unwrap();
 
                             match msg {
                                 ClientMessage::RPCRequest { id, internal } => {
+                                    let span = span!(Level::DEBUG, "rpc", id = id);
+                                    let _enter = span.enter();
+
                                     if in_flight[id as usize] {
-                                        warn!("RPC call {id} already in flight. Ignoring.");
+                                        warn!("RPC call already in flight. Ignoring.");
                                         continue;
                                     }
 
-                                    debug!("Received RPC call {id} from client. Spawning handler task...");
+                                    debug!("Received call from client. Spawning handler task...");
 
                                     let tx = rpc_tx.clone();
                                     let handler = handler.clone();
@@ -186,7 +212,7 @@ where
                                         ).await
                                     });
 
-                                    debug!("RPC call {id} handler task spawned.");
+                                    debug!("Handler task spawned.");
                                 }
                             }
                         }
@@ -197,18 +223,30 @@ where
                             ServerMessage::RPCResponse { id, .. } => id,
                             _ => unreachable!(),
                         };
+                        let span = span!(Level::DEBUG, "rpc", id = id);
+                        let _enter = span.enter();
                         in_flight[id as usize] = false;
-                        debug!("RPC call {id} finished. Serializing and sending response...");
+                        debug!("RPC call finished. Serializing and sending response...");
                         let binary = rkyv::to_bytes::<ServerMessage, 1024>(&msg).unwrap().to_vec();
-                        ws_stream.send(Message::Binary(binary)).await.unwrap();
-                        debug!("RPC call {id} response sent.");
+                        match ws_stream.send(Message::Binary(binary)).await {
+                            Ok(_) => debug!("Response sent."),
+                            Err(e) => {
+                                warn!("Error sending response to client: {}", e);
+                                continue
+                            }
+                        };
                     }
                     // await state updates from the application
                     Some(state_changes) = state_change_rx.recv() => {
                         debug!("Received {} state update(s) from application. Serializing and sending...", state_changes.len());
                         let binary = rkyv::to_bytes::<ServerMessage, 1024>(&ServerMessage::StateChange(state_changes)).unwrap().to_vec();
-                        ws_stream.send(Message::Binary(binary)).await.unwrap();
-                        debug!("State update sent.");
+                        match ws_stream.send(Message::Binary(binary)).await {
+                            Ok(_) => debug!("State update sent."),
+                            Err(e) => {
+                                warn!("Error sending state update to client: {}", e);
+                                continue
+                            }
+                        };
                     }
                 }
             }

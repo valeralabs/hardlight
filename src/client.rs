@@ -1,14 +1,32 @@
-use std::{sync::Arc, time::SystemTime, str::FromStr};
+use std::{str::FromStr, sync::Arc, time::SystemTime};
 
 use futures_util::{SinkExt, StreamExt};
 use rustls_native_certs::load_native_certs;
-use tokio::{sync::{oneshot, mpsc}, select};
-use tokio_rustls::rustls::{ClientConfig as TLSClientConfig, RootCertStore, Certificate, client::{ServerCertVerifier, ServerCertVerified}, ServerName};
-use tokio_tungstenite::{tungstenite::{http::{HeaderValue, Request}, handshake::client::generate_key, Message}, Connector, connect_async_tls_with_config};
-use tracing::{span, Level, debug, warn};
+use tokio::{
+    select,
+    sync::{mpsc, oneshot},
+};
+use tokio_rustls::rustls::{
+    client::{ServerCertVerified, ServerCertVerifier},
+    Certificate, ClientConfig as TLSClientConfig, RootCertStore, ServerName,
+};
+use tokio_tungstenite::{
+    connect_async_tls_with_config,
+    tungstenite::{
+        error::ProtocolError,
+        handshake::client::generate_key,
+        http::{HeaderValue, Request},
+        Error, Message,
+    },
+    Connector,
+};
+use tracing::{debug, error, span, warn, Level};
 use version::Version;
 
-use crate::{server::{HandlerResult, HL_VERSION}, wire::{RpcHandlerError, ServerMessage, ClientMessage}};
+use crate::{
+    server::{HandlerResult, HL_VERSION},
+    wire::{ClientMessage, RpcHandlerError, ServerMessage},
+};
 
 pub struct ClientConfig {
     tls: TLSClientConfig,
@@ -23,8 +41,6 @@ pub struct Client<T>
 where
     T: State + Default,
 {
-    rpc_channel_sender:
-        Option<mpsc::Sender<(Vec<u8>, oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>)>>,
     config: ClientConfig,
     state: T,
     hl_version_string: HeaderValue,
@@ -68,30 +84,26 @@ where
     pub fn new_with_config(config: ClientConfig) -> Self {
         let version = Version::from_str(HL_VERSION).unwrap();
         Self {
-            rpc_channel_sender: None,
             config,
             state: T::default(),
             hl_version_string: format!("hl/{}", version.major).parse().unwrap(),
         }
     }
 
-    pub async fn make_rpc_call(&self, internal: Vec<u8>) -> HandlerResult<Vec<u8>> {
-        if let Some(rpc_chan) = self.rpc_channel_sender.clone() {
-            let (tx, rx) = oneshot::channel();
-            rpc_chan.send((internal, tx)).await.unwrap();
-            rx.await.unwrap()
-        } else {
-            Err(RpcHandlerError::ClientNotConnected)
-        }
-    }
-
     pub async fn connect(
         &mut self,
-        mut shutdown: mpsc::Receiver<()>,
-        channels_tx: oneshot::Sender<(
+        // Allows the application's wrapping client to shut down the connection
+        mut shutdown: oneshot::Receiver<()>,
+        // Sends control channels to the application so it can send RPC calls,
+        // events, and other things to the server.
+        control_channels_tx: oneshot::Sender<(
             mpsc::Sender<(Vec<u8>, oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>)>,
         )>,
-    ) {
+        // This will send immediately once the client has connected to the server.
+        // The client is guaranteed to not return an error after this is sent
+        // so it is safe to ignore the result.
+        ok_tx: oneshot::Sender<()>,
+    ) -> Result<(), Error> {
         let span = span!(Level::DEBUG, "connection", host = self.config.host);
         let _enter = span.enter();
 
@@ -110,13 +122,20 @@ where
             .expect("Failed to build request");
 
         debug!("Connecting to server...");
-        let (mut stream, _) = connect_async_tls_with_config(req, None, Some(connector))
-            .await
-            .unwrap();
-        debug!("Connected to server.");
+        let (mut stream, res) = connect_async_tls_with_config(req, None, Some(connector)).await?;
+
+        let protocol = res.headers().get("Sec-WebSocket-Protocol");
+        if protocol.is_none() || protocol.unwrap() != &self.hl_version_string {
+            error!("Received bad version from server. Wanted {:?}, got {:?}", self.hl_version_string, protocol);
+            return Err(Error::Protocol(ProtocolError::HandshakeIncomplete));
+        }
+        
+        debug!("Connected to server. Sending ok to application...");
+        ok_tx.send(()).unwrap();
+        debug!("Ok sent.");
         debug!("Sending control channels to application...");
         let (rpc_tx, mut rpc_rx) = mpsc::channel(10);
-        channels_tx.send((rpc_tx,)).unwrap();
+        control_channels_tx.send((rpc_tx,)).unwrap();
         debug!("Control channels sent.");
 
         // keep track of active RPC calls
@@ -166,7 +185,7 @@ where
                                 warn!("Failed to serialize RPC call. Ignoring. Error: {e}");
                                 // we don't care if the receiver has dropped
                                 let _ = completion_tx.send(Err(RpcHandlerError::BadInputBytes));
-                                return
+                                continue
                             }
                         }.to_vec();
 
@@ -178,7 +197,7 @@ where
                                 warn!("Failed to send RPC call. Ignoring. Error: {e}");
                                 // we don't care if the receiver has dropped
                                 let _ = completion_tx.send(Err(RpcHandlerError::ClientNotConnected));
-                                return
+                                continue
                             }
                         }
 
@@ -228,13 +247,14 @@ where
                     }
                 }
                 // await shutdown signal
-                _ = shutdown.recv() => {
+                _ = &mut shutdown => {
                     break;
                 }
             }
         }
 
         debug!("RPC handler loop exited.");
+        Ok(())
     }
 
     pub fn state(&self) -> &T {

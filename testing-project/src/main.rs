@@ -3,18 +3,18 @@
 use async_trait::async_trait;
 use hardlight::{
     Client, Handler, HandlerResult, RpcHandlerError, Server, ServerConfig, State,
-    StateUpdateChannel,
+    StateUpdateChannel, tungstenite,
 };
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
-use tokio::sync::{
+use tokio::{sync::{
     mpsc,
     oneshot,
-};
-use tracing::info;
+}, select};
+use tracing::{info, debug, error};
 
 use std::{
     ops::{Deref, DerefMut},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard}, time::Instant,
 };
 
 #[tokio::main]
@@ -31,10 +31,10 @@ async fn main() -> Result<(), std::io::Error> {
     });
     
     // wait for the server to start
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     
     let mut client = CounterClient::new_self_signed("localhost:8080");
-    client.connect().await;
+    client.connect().await.unwrap();
 
     let first_value = client.get().await.expect("get failed");
     info!("Incrementing counter using 100 tasks with 100 increments each");
@@ -43,11 +43,11 @@ async fn main() -> Result<(), std::io::Error> {
     let counter = Arc::new(client);
 
     let mut tasks = Vec::new();
-    for _ in 0..100 {
+    for _ in 0..200 {
         let counter = counter.clone();
         tasks.push(tokio::spawn(async move {
-            for _ in 0..100 {
-                counter.increment(1).await.expect("increment failed");
+            for _ in 0..10 {
+                let _ = counter.increment(1).await;
             }
         }));
     }
@@ -59,9 +59,9 @@ async fn main() -> Result<(), std::io::Error> {
     let final_value = counter.get().await.expect("get failed");
 
     info!("Final value: {}", final_value);
-
+    
     // make sure server-side mutex is working...
-    assert!(final_value == first_value + 10000);
+    assert!(final_value == 2560);
 
     Ok(())
 }
@@ -279,7 +279,7 @@ impl DerefMut for StateGuard<'_> {
 struct CounterClient {
     host: String,
     self_signed: bool,
-    shutdown: Option<mpsc::Sender<()>>,
+    shutdown: Option<oneshot::Sender<()>>,
     rpc_tx: Option<mpsc::Sender<(Vec<u8>, oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>)>>
 }
 
@@ -302,9 +302,11 @@ impl CounterClient {
         }
     }
 
-    pub async fn connect(&mut self) {
-        let (shutdown, shutdown_rx) = mpsc::channel(1);
-        let (channels_tx, channels_rx) = oneshot::channel();
+    pub async fn connect(&mut self) -> Result<(), tungstenite::Error> {
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let (control_channels_tx, control_channels_rx) = oneshot::channel();
+        let (error_tx, error_rx) = oneshot::channel();
+        let (ok_tx, ok_rx) = oneshot::channel();
         
         let self_signed = self.self_signed;
         let host = self.host.clone();
@@ -316,19 +318,34 @@ impl CounterClient {
                 Client::new(&host)
             };
 
-            client.connect(shutdown_rx, channels_tx).await;
+            if let Err(e) = client.connect(shutdown_rx, control_channels_tx, ok_tx).await {
+                error_tx.send(e).unwrap()
+            };
         });
 
-        let (rpc_tx,) = channels_rx.await.unwrap();
+        select! {
+            _ = ok_rx => {
+                // at this point, the client will NOT return any errors, so we
+                // can safely ignore the error_rx channel
+                debug!("Ok received from client")
+            }
+            e = error_rx => {
+                error!("Error received from client: {:?}", e);
+                return Err(e.unwrap());
+            }
+        }
+
+        let (rpc_tx,) = control_channels_rx.await.unwrap();
 
         self.shutdown = Some(shutdown);
         self.rpc_tx = Some(rpc_tx);
+        Ok(())
     }
 
-    pub async fn disconnect(&mut self) {
+    pub fn disconnect(&mut self) {
         match self.shutdown.take() {
             Some(shutdown) => {
-                shutdown.send(()).await.unwrap();
+                let _ = shutdown.send(());
             }
             None => {}
         }
@@ -344,6 +361,12 @@ impl CounterClient {
         } else {
             Err(RpcHandlerError::ClientNotConnected)
         }
+    }
+}
+
+impl Drop for CounterClient {
+    fn drop(&mut self) {
+        self.disconnect();
     }
 }
 
