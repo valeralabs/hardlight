@@ -39,7 +39,7 @@ async fn main() -> Result<(), std::io::Error> {
     client.connect().await.unwrap();
 
     let first_value = client.get().await.expect("get failed");
-    let num_tasks = 256;
+    let num_tasks = 12;
     let num_increments_per_task = 100;
     info!("Incrementing counter using {num_tasks} tasks with {num_increments_per_task} increments each");
     info!("First value: {}", first_value);
@@ -48,12 +48,14 @@ async fn main() -> Result<(), std::io::Error> {
 
 
     let mut tasks = Vec::new();
-    let start = tokio::time::Instant::now();
     for _ in 0..num_tasks {
         let counter = counter.clone();
         tasks.push(tokio::spawn(async move {
             for _ in 0..num_increments_per_task {
+                let start = tokio::time::Instant::now();
                 let _ = counter.increment(1).await;
+                let elapsed = start.elapsed();
+                info!("Task: {:?}", elapsed);
             }
         }));
     }
@@ -62,8 +64,6 @@ async fn main() -> Result<(), std::io::Error> {
         task.await.expect("task failed");
     }
     
-    let elapsed = start.elapsed();
-    info!("Per task: {:?}", elapsed / (num_increments_per_task*num_tasks) as u32);
 
     let final_value = counter.get().await.expect("get failed");
 
