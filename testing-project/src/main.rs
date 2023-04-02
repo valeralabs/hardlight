@@ -2,20 +2,22 @@
 // see: https://github.com/rust-lang/rust/issues/91611
 use async_trait::async_trait;
 use hardlight::{
-    Client, Handler, HandlerResult, RpcHandlerError, Server, ServerConfig, State,
-    StateUpdateChannel, tungstenite,
+    tungstenite, Client, Handler, HandlerResult, RpcHandlerError, Server, ServerConfig, State,
+    StateUpdateChannel,
 };
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
-use tokio::{sync::{
-    mpsc,
-    oneshot,
-}, select};
-use tracing::{info, debug, error};
+use tokio::{
+    select,
+    sync::{mpsc, oneshot},
+};
+use tracing::{debug, error, info};
 
 use std::{
     ops::{Deref, DerefMut},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::Arc,
 };
+
+use parking_lot::{Mutex, MutexGuard};
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -25,28 +27,31 @@ async fn main() -> Result<(), std::io::Error> {
     let config = ServerConfig::new_self_signed("localhost:8080");
     info!("Config: {:?}", config);
     let server = Server::new(config, CounterHandler::init());
-    
+
     tokio::spawn(async move {
         let _ = server.run().await;
     });
-    
+
     // wait for the server to start
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    
+
     let mut client = CounterClient::new_self_signed("localhost:8080");
     client.connect().await.unwrap();
-    
+
     let first_value = client.get().await.expect("get failed");
     info!("Incrementing counter using 100 tasks with 100 increments each");
     info!("First value: {}", first_value);
 
     let counter = Arc::new(client);
 
+    let num_tasks = 256;
+    let num_increments_per_task = 100;
+
     let mut tasks = Vec::new();
-    for _ in 0..200 {
+    for _ in 0..num_tasks {
         let counter = counter.clone();
         tasks.push(tokio::spawn(async move {
-            for _ in 0..10 {
+            for _ in 0..num_increments_per_task {
                 let _ = counter.increment(1).await;
             }
         }));
@@ -59,9 +64,9 @@ async fn main() -> Result<(), std::io::Error> {
     let final_value = counter.get().await.expect("get failed");
 
     info!("Final value: {}", final_value);
-    
+
     // make sure server-side mutex is working...
-    assert!(final_value == 2000);
+    assert!(final_value == first_value + (num_tasks * num_increments_per_task) as u32);
 
     Ok(())
 }
@@ -164,20 +169,20 @@ impl Handler for CounterHandler {
 impl Counter for CounterHandler {
     async fn increment(&self, amount: u32) -> HandlerResult<u32> {
         // lock the state to the current thread
-        let mut state: StateGuard = self.state.lock()?;
+        let mut state: StateGuard = self.state.lock();
         state.counter += amount;
         Ok(state.counter)
     } // state is automatically unlocked here; any changes are sent to the client
       // automagically ✨
 
     async fn decrement(&self, amount: u32) -> HandlerResult<u32> {
-        let mut state = self.state.lock()?;
+        let mut state = self.state.lock();
         state.counter -= amount;
         Ok(state.counter)
     }
 
     async fn get(&self) -> HandlerResult<u32> {
-        let state = self.state.lock()?;
+        let state = self.state.lock();
         Ok(state.counter)
     }
 }
@@ -205,14 +210,12 @@ impl CounterConnectionState {
 
     /// locks the state to the current thread by providing a StateGuard
     /// the StateGuard gets
-    fn lock(&self) -> Result<StateGuard, RpcHandlerError> {
-        match self.state.lock() {
-            Ok(state) => Ok(StateGuard {
-                starting_state: state.clone(),
-                state,
-                channel: self.channel.clone(),
-            }),
-            Err(_) => Err(RpcHandlerError::StatePoisoned),
+    fn lock(&self) -> StateGuard {
+        let state = self.state.lock();
+        StateGuard {
+            starting_state: state.clone(),
+            state,
+            channel: self.channel.clone(),
         }
     }
 }
@@ -280,7 +283,7 @@ struct CounterClient {
     host: String,
     self_signed: bool,
     shutdown: Option<oneshot::Sender<()>>,
-    rpc_tx: Option<mpsc::Sender<(Vec<u8>, oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>)>>
+    rpc_tx: Option<mpsc::Sender<(Vec<u8>, oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>)>>,
 }
 
 impl CounterClient {
@@ -307,7 +310,7 @@ impl CounterClient {
         let (control_channels_tx, control_channels_rx) = oneshot::channel();
         let (error_tx, error_rx) = oneshot::channel();
         let (ok_tx, ok_rx) = oneshot::channel();
-        
+
         let self_signed = self.self_signed;
         let host = self.host.clone();
 
@@ -318,7 +321,10 @@ impl CounterClient {
                 Client::new(&host)
             };
 
-            if let Err(e) = client.connect(shutdown_rx, control_channels_tx, ok_tx).await {
+            if let Err(e) = client
+                .connect(shutdown_rx, control_channels_tx, ok_tx)
+                .await
+            {
                 error_tx.send(e).unwrap()
             };
         });
@@ -354,9 +360,15 @@ impl CounterClient {
     async fn handle_rpc_call(&self, method: Method, args: Vec<u8>) -> HandlerResult<Vec<u8>> {
         if let Some(rpc_chan) = self.rpc_tx.clone() {
             let (tx, rx) = oneshot::channel();
-            rpc_chan.send((rkyv::to_bytes::<RpcCall, 1024>(&RpcCall { method, args })
-            .map_err(|_| RpcHandlerError::BadInputBytes)?
-            .to_vec(), tx)).await.unwrap();
+            rpc_chan
+                .send((
+                    rkyv::to_bytes::<RpcCall, 1024>(&RpcCall { method, args })
+                        .map_err(|_| RpcHandlerError::BadInputBytes)?
+                        .to_vec(),
+                    tx,
+                ))
+                .await
+                .unwrap();
             rx.await.unwrap()
         } else {
             Err(RpcHandlerError::ClientNotConnected)

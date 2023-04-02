@@ -166,9 +166,9 @@ where
             debug!("Connection fully established");
 
             // keep track of active RPC calls
-            let mut in_flight = [false; u8::MAX as usize];
+            let mut in_flight = [false; u8::MAX as usize + 1];
 
-            let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize);
+            let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize + 1);
 
             let handler = Arc::new(handler);
 
