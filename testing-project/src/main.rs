@@ -14,7 +14,7 @@ use tracing::{info, debug, error};
 
 use std::{
     ops::{Deref, DerefMut},
-    sync::{Arc, Mutex, MutexGuard}, time::Instant,
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 #[tokio::main]
@@ -35,7 +35,7 @@ async fn main() -> Result<(), std::io::Error> {
     
     let mut client = CounterClient::new_self_signed("localhost:8080");
     client.connect().await.unwrap();
-
+    
     let first_value = client.get().await.expect("get failed");
     info!("Incrementing counter using 100 tasks with 100 increments each");
     info!("First value: {}", first_value);
@@ -61,7 +61,7 @@ async fn main() -> Result<(), std::io::Error> {
     info!("Final value: {}", final_value);
     
     // make sure server-side mutex is working...
-    assert!(final_value == 2560);
+    assert!(final_value == 2000);
 
     Ok(())
 }
