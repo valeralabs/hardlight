@@ -39,15 +39,16 @@ async fn main() -> Result<(), std::io::Error> {
     client.connect().await.unwrap();
 
     let first_value = client.get().await.expect("get failed");
-    info!("Incrementing counter using 100 tasks with 100 increments each");
+    let num_tasks = 256;
+    let num_increments_per_task = 100;
+    info!("Incrementing counter using {num_tasks} tasks with {num_increments_per_task} increments each");
     info!("First value: {}", first_value);
 
     let counter = Arc::new(client);
 
-    let num_tasks = 256;
-    let num_increments_per_task = 100;
 
     let mut tasks = Vec::new();
+    let start = tokio::time::Instant::now();
     for _ in 0..num_tasks {
         let counter = counter.clone();
         tasks.push(tokio::spawn(async move {
@@ -56,10 +57,13 @@ async fn main() -> Result<(), std::io::Error> {
             }
         }));
     }
-
+    
     for task in tasks {
         task.await.expect("task failed");
     }
+    
+    let elapsed = start.elapsed();
+    info!("Per task: {:?}", elapsed / (num_increments_per_task*num_tasks) as u32);
 
     let final_value = counter.get().await.expect("get failed");
 
