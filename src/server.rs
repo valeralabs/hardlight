@@ -21,7 +21,7 @@ use tokio_tungstenite::{
         Message,
     },
 };
-use tracing::{debug, info, span, warn, Level};
+use tracing::{debug, info, span, warn, Instrument, Level};
 use version::{version, Version};
 
 use crate::wire::{ClientMessage, RpcHandlerError, ServerMessage};
@@ -117,14 +117,14 @@ where
 
         loop {
             let (stream, peer_addr) = listener.accept().await?;
-            let span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
-            let _enter = span.enter();
             let acceptor = acceptor.clone();
-
-            if let Ok(stream) = acceptor.accept(stream).await {
-                debug!("Successfully terminated TLS handshake");
-                self.handle_connection(stream, peer_addr);
-            }
+            let span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
+            async move {
+                if let Ok(stream) = acceptor.accept(stream).await {
+                    debug!("Successfully terminated TLS handshake");
+                    self.handle_connection(stream, peer_addr);
+                }
+            }.instrument(span).await
         }
     }
 
@@ -133,123 +133,126 @@ where
         let handler = (self.factory)(state_change_tx);
         let version: HeaderValue = self.hl_version_string.clone();
         tokio::spawn(async move {
-            let span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
-            let _enter = span.enter();
+            let connection_span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
 
-            let callback = |req: &Request, mut response: Response| {
-                // request is only valid if req.headers().get("Sec-WebSocket-Protocol") is
-                // Some(req_version) AND req_version == version
-                let req_version = req.headers().get("Sec-WebSocket-Protocol");
-                if req_version.is_none() || req_version.unwrap() != &version {
-                    *response.status_mut() = StatusCode::BAD_REQUEST;
-                    warn!("Invalid request from {}, version mismatch (client gave {:?}, server wanted {:?})", peer_addr, req_version, Some(version));
-                    return Ok(response);
-                } else {
-                    let headers = response.headers_mut();
-                    headers.append("Sec-WebSocket-Protocol", version);
-                    debug!(
-                        "Received valid handshake, upgrading connection to HardLight ({})",
-                        req_version.unwrap().to_str().unwrap()
-                    );
-                    Ok(response)
-                }
-            };
+            async move {
+                let callback = |req: &Request, mut response: Response| {
+                    // request is only valid if req.headers().get("Sec-WebSocket-Protocol") is
+                    // Some(req_version) AND req_version == version
+                    let req_version = req.headers().get("Sec-WebSocket-Protocol");
+                    if req_version.is_none() || req_version.unwrap() != &version {
+                        *response.status_mut() = StatusCode::BAD_REQUEST;
+                        warn!("Invalid request from {}, version mismatch (client gave {:?}, server wanted {:?})", peer_addr, req_version, Some(version));
+                        return Ok(response);
+                    } else {
+                        let headers = response.headers_mut();
+                        headers.append("Sec-WebSocket-Protocol", version);
+                        debug!(
+                            "Received valid handshake, upgrading connection to HardLight ({})",
+                            req_version.unwrap().to_str().unwrap()
+                        );
+                        Ok(response)
+                    }
+                };
 
-            let mut ws_stream = match accept_hdr_async(stream, callback).await {
-                Ok(ws_stream) => ws_stream,
-                Err(e) => {
-                    warn!("Error accepting connection from {}: {}", peer_addr, e);
-                    return;
-                }
-            };
+                let mut ws_stream = match accept_hdr_async(stream, callback).await {
+                    Ok(ws_stream) => ws_stream,
+                    Err(e) => {
+                        warn!("Error accepting connection from {}: {}", peer_addr, e);
+                        return;
+                    }
+                };
 
-            debug!("Connection fully established");
+                debug!("Connection fully established");
 
-            // keep track of active RPC calls
-            let mut in_flight = [false; u8::MAX as usize + 1];
+                // keep track of active RPC calls
+                let mut in_flight = [false; u8::MAX as usize + 1];
 
-            let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize + 1);
+                let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize + 1);
 
-            let handler = Arc::new(handler);
+                let handler = Arc::new(handler);
 
-            debug!("Starting RPC handler loop");
-            loop {
-                select! {
-                    // await new messages from the client
-                    Some(msg) = ws_stream.next() => {
-                        let msg = match msg {
-                            Ok(msg) => msg,
-                            Err(e) => {
-                                warn!("Error receiving message from client: {}", e);
-                                continue;
-                            }
-                        };
-                        if msg.is_binary() {
-                            let binary = msg.into_data();
-                            let msg: ClientMessage = rkyv::from_bytes(&binary).unwrap();
+                debug!("Starting RPC handler loop");
+                loop {
+                    select! {
+                        // await new messages from the client
+                        Some(msg) = ws_stream.next() => {
+                            let msg = match msg {
+                                Ok(msg) => msg,
+                                Err(e) => {
+                                    warn!("Error receiving message from client: {}", e);
+                                    continue;
+                                }
+                            };
+                            if msg.is_binary() {
+                                let binary = msg.into_data();
+                                let msg: ClientMessage = rkyv::from_bytes(&binary).unwrap();
 
-                            match msg {
-                                ClientMessage::RPCRequest { id, internal } => {
-                                    let span = span!(Level::DEBUG, "rpc", id = id);
-                                    let _enter = span.enter();
+                                match msg {
+                                    ClientMessage::RPCRequest { id, internal } => {
+                                        let span = span!(Level::DEBUG, "rpc", id = id);
+                                        let _enter = span.enter();
 
-                                    if in_flight[id as usize] {
-                                        warn!("RPC call already in flight. Ignoring.");
-                                        continue;
+                                        if in_flight[id as usize] {
+                                            warn!("RPC call already in flight. Ignoring.");
+                                            continue;
+                                        }
+
+                                        debug!("Received call from client. Spawning handler task...");
+
+                                        let tx = rpc_tx.clone();
+                                        let handler = handler.clone();
+                                        in_flight[id as usize] = true;
+                                        tokio::spawn(async move {
+                                            tx.send(
+                                                ServerMessage::RPCResponse {
+                                                    id,
+                                                    output: handler.handle_rpc_call(&internal).await,
+                                                }
+                                            ).await
+                                        });
+
+                                        debug!("Handler task spawned.");
                                     }
-
-                                    debug!("Received call from client. Spawning handler task...");
-
-                                    let tx = rpc_tx.clone();
-                                    let handler = handler.clone();
-                                    in_flight[id as usize] = true;
-                                    tokio::spawn(async move {
-                                        tx.send(
-                                            ServerMessage::RPCResponse {
-                                                id,
-                                                output: handler.handle_rpc_call(&internal).await,
-                                            }
-                                        ).await
-                                    });
-
-                                    debug!("Handler task spawned.");
                                 }
                             }
                         }
-                    }
-                    // await responses from RPC calls
-                    Some(msg) = rpc_rx.recv() => {
-                        let id = match msg {
-                            ServerMessage::RPCResponse { id, .. } => id,
-                            _ => unreachable!(),
-                        };
-                        let span = span!(Level::DEBUG, "rpc", id = id);
-                        let _enter = span.enter();
-                        in_flight[id as usize] = false;
-                        debug!("RPC call finished. Serializing and sending response...");
-                        let binary = rkyv::to_bytes::<ServerMessage, 1024>(&msg).unwrap().to_vec();
-                        match ws_stream.send(Message::Binary(binary)).await {
-                            Ok(_) => debug!("Response sent."),
-                            Err(e) => {
-                                warn!("Error sending response to client: {}", e);
-                                continue
-                            }
-                        };
-                    }
-                    // await state updates from the application
-                    Some(state_changes) = state_change_rx.recv() => {
-                        debug!("Received {} state update(s) from application. Serializing and sending...", state_changes.len());
-                        let binary = rkyv::to_bytes::<ServerMessage, 1024>(&ServerMessage::StateChange(state_changes)).unwrap().to_vec();
-                        match ws_stream.send(Message::Binary(binary)).await {
-                            Ok(_) => debug!("State update sent."),
-                            Err(e) => {
-                                warn!("Error sending state update to client: {}", e);
-                                continue
-                            }
-                        };
+                        // await responses from RPC calls
+                        Some(msg) = rpc_rx.recv() => {
+                            let id = match msg {
+                                ServerMessage::RPCResponse { id, .. } => id,
+                                _ => unreachable!(),
+                            };
+                            let span = span!(Level::DEBUG, "rpc", id = id);
+                            let _enter = span.enter();
+                            in_flight[id as usize] = false;
+                            debug!("RPC call finished. Serializing and sending response...");
+                            let binary = rkyv::to_bytes::<ServerMessage, 1024>(&msg).unwrap().to_vec();
+                            match ws_stream.send(Message::Binary(binary)).await {
+                                Ok(_) => debug!("Response sent."),
+                                Err(e) => {
+                                    warn!("Error sending response to client: {}", e);
+                                    continue
+                                }
+                            };
+                        }
+                        // await state updates from the application
+                        Some(state_changes) = state_change_rx.recv() => {
+                            let span = span!(Level::DEBUG, "state_change");
+                            let _enter = span.enter();
+                            debug!("Received {} state update(s) from application. Serializing and sending...", state_changes.len());
+                            let binary = rkyv::to_bytes::<ServerMessage, 1024>(&ServerMessage::StateChange(state_changes)).unwrap().to_vec();
+                            match ws_stream.send(Message::Binary(binary)).await {
+                                Ok(_) => debug!("State update sent."),
+                                Err(e) => {
+                                    warn!("Error sending state update to client: {}", e);
+                                    continue
+                                }
+                            };
+                        }
                     }
                 }
-            }
+            }.instrument(connection_span).await
         });
     }
 }

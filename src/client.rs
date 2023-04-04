@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc, time::SystemTime};
+use std::{str::FromStr, sync::Arc, time::SystemTime, fmt::Debug};
 
 use futures_util::{SinkExt, StreamExt};
 use rustls_native_certs::load_native_certs;
@@ -20,7 +20,7 @@ use tokio_tungstenite::{
     },
     Connector,
 };
-use tracing::{debug, error, span, warn, Level};
+use tracing::{debug, error, span, warn, Level, Instrument};
 use version::Version;
 
 use crate::{
@@ -39,7 +39,7 @@ pub trait State {
 
 pub struct Client<T>
 where
-    T: State + Default,
+    T: State + Default + Debug,
 {
     config: ClientConfig,
     state: T,
@@ -48,7 +48,7 @@ where
 
 impl<T> Client<T>
 where
-    T: State + Default,
+    T: State + Default + Debug,
 {
     /// Creates a new client that doesn't verify the server's certificate.
     pub fn new_self_signed(host: &str) -> Self {
@@ -81,17 +81,17 @@ where
     }
 
     /// Create a new client using the given configuration.
-    pub fn new_with_config(config: ClientConfig) -> Self {
+    fn new_with_config(config: ClientConfig) -> Self {
         let version = Version::from_str(HL_VERSION).unwrap();
         Self {
             config,
-            state: T::default(),
+            state: T::default().into(),
             hl_version_string: format!("hl/{}", version.major).parse().unwrap(),
         }
     }
 
-    pub async fn connect(
-        &mut self,
+    pub async fn connect<'a>(
+        &'a mut self,
         // Allows the application's wrapping client to shut down the connection
         mut shutdown: oneshot::Receiver<()>,
         // Sends control channels to the application so it can send RPC calls,
@@ -99,166 +99,165 @@ where
         control_channels_tx: oneshot::Sender<(
             mpsc::Sender<(Vec<u8>, oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>)>,
         )>,
-        // This will send immediately once the client has connected to the server.
-        // The client is guaranteed to not return an error after this is sent
-        // so it is safe to ignore the result.
-        ok_tx: oneshot::Sender<()>,
     ) -> Result<(), Error> {
-        let span = span!(Level::DEBUG, "connection", host = self.config.host);
-        let _enter = span.enter();
+        let connection_span = span!(Level::DEBUG, "connection", host = self.config.host);
 
-        let connector = Connector::Rustls(Arc::new(self.config.tls.clone()));
+        async move {
+            let connector = Connector::Rustls(Arc::new(self.config.tls.clone()));
 
-        let req = Request::builder()
-            .method("GET")
-            .header("Host", self.config.host.clone())
-            .header("Connection", "Upgrade")
-            .header("Upgrade", "websocket")
-            .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", generate_key())
-            .header("Sec-WebSocket-Protocol", self.hl_version_string.clone())
-            .uri(format!("wss://{}/", self.config.host))
-            .body(())
-            .expect("Failed to build request");
+            let req = Request::builder()
+                .method("GET")
+                .header("Host", self.config.host.clone())
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "websocket")
+                .header("Sec-WebSocket-Version", "13")
+                .header("Sec-WebSocket-Key", generate_key())
+                .header("Sec-WebSocket-Protocol", self.hl_version_string.clone())
+                .uri(format!("wss://{}/", self.config.host))
+                .body(())
+                .expect("Failed to build request");
 
-        debug!("Connecting to server...");
-        let (mut stream, res) = connect_async_tls_with_config(req, None, Some(connector)).await?;
+            debug!("Connecting to server...");
+            let (mut stream, res) = connect_async_tls_with_config(req, None, Some(connector)).await?;
 
-        let protocol = res.headers().get("Sec-WebSocket-Protocol");
-        if protocol.is_none() || protocol.unwrap() != &self.hl_version_string {
-            error!("Received bad version from server. Wanted {:?}, got {:?}", self.hl_version_string, protocol);
-            return Err(Error::Protocol(ProtocolError::HandshakeIncomplete));
-        }
-        
-        debug!("Connected to server. Sending ok to application...");
-        ok_tx.send(()).unwrap();
-        debug!("Ok sent.");
-        debug!("Sending control channels to application...");
-        let (rpc_tx, mut rpc_rx) = mpsc::channel(10);
-        control_channels_tx.send((rpc_tx,)).unwrap();
-        debug!("Control channels sent.");
+            let protocol = res.headers().get("Sec-WebSocket-Protocol");
+            if protocol.is_none() || protocol.unwrap() != &self.hl_version_string {
+                error!("Received bad version from server. Wanted {:?}, got {:?}", self.hl_version_string, protocol);
+                return Err(Error::Protocol(ProtocolError::HandshakeIncomplete));
+            }
+            
+            debug!("Connected to server.");
+            debug!("Sending control channels to application...");
+            let (rpc_tx, mut rpc_rx) = mpsc::channel(10);
 
-        // keep track of active RPC calls
-        // we have to do this dumb thing because we can't copy a oneshot::Sender
-        let mut active_rpc_calls: [Option<oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>>; 256] = [
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None,
-        ];
+            control_channels_tx.send((rpc_tx,)).unwrap();
+            debug!("Control channels sent.");
 
-        debug!("Starting RPC handler loop");
-        loop {
-            select! {
-                // await RPC requests from the application
-                Some((internal, completion_tx)) = rpc_rx.recv() => {
-                    debug!("Received RPC request from application");
-                    // find a free rpc id
-                    if let Some(id) = active_rpc_calls.iter().position(|x| x.is_none()) {
-                        let span = span!(Level::DEBUG, "rpc", id = id as u8);
-                        let _enter = span.enter();
-                        debug!("Found free RPC id");
+            // keep track of active RPC calls
+            // we have to do this dumb thing because we can't copy a oneshot::Sender
+            let mut active_rpc_calls: [Option<oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>>; 256] = [
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None,
+            ];
 
-                        let msg = ClientMessage::RPCRequest {
-                            id: id as u8,
-                            internal
-                        };
+            debug!("Starting RPC handler loop");
+            loop {
+                select! {
+                    // await RPC requests from the application
+                    Some((internal, completion_tx)) = rpc_rx.recv() => {
+                        debug!("Received RPC request from application");
+                        // find a free rpc id
+                        if let Some(id) = active_rpc_calls.iter().position(|x| x.is_none()) {
+                            let span = span!(Level::DEBUG, "rpc", id = id);
+                            let _enter = span.enter();
+                            debug!("Found free RPC id");
 
-                        let binary = match rkyv::to_bytes::<ClientMessage, 1024>(&msg) {
-                            Ok(bytes) => bytes,
-                            Err(e) => {
-                                warn!("Failed to serialize RPC call. Ignoring. Error: {e}");
-                                // we don't care if the receiver has dropped
-                                let _ = completion_tx.send(Err(RpcHandlerError::BadInputBytes));
-                                continue
-                            }
-                        }.to_vec();
-
-                        debug!("Sending RPC call to server");
-
-                        match stream.send(Message::Binary(binary)).await {
-                            Ok(_) => (),
-                            Err(e) => {
-                                warn!("Failed to send RPC call. Ignoring. Error: {e}");
-                                // we don't care if the receiver has dropped
-                                let _ = completion_tx.send(Err(RpcHandlerError::ClientNotConnected));
-                                continue
-                            }
-                        }
-
-                        debug!("RPC call sent to server");
-
-                        active_rpc_calls[id] = Some(completion_tx);
-                    } else {
-                        warn!("No free RPC id available. Responding with an error.");
-                        let _ = completion_tx.send(Err(RpcHandlerError::TooManyCallsInFlight));
-                    }
-                }
-                // await RPC responses from the server
-                Some(msg) = stream.next() => {
-                    if let Ok(msg) = msg {
-                        if let Message::Binary(bytes) = msg {
-                            let msg: ServerMessage = match rkyv::from_bytes(&bytes) {
-                                Ok(msg) => msg,
-                                Err(e) => {
-                                    warn!("Received invalid RPC response. Ignoring. Error: {e}");
-                                    continue;
-                                }
+                            let msg = ClientMessage::RPCRequest {
+                                id: id as u8,
+                                internal
                             };
-                            match msg {
-                                ServerMessage::RPCResponse { id, output } => {
-                                    let span = span!(Level::DEBUG, "rpc", id = id as u8);
-                                    let _enter = span.enter();
-                                    debug!("Received RPC response from server");
-                                    if let Some(completion_tx) = active_rpc_calls[id as usize].take() {
-                                        let _ = completion_tx.send(output);
-                                    } else {
-                                        warn!("Received RPC response for unknown RPC call. Ignoring.");
+
+                            let binary = match rkyv::to_bytes::<ClientMessage, 1024>(&msg) {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    warn!("Failed to serialize RPC call. Ignoring. Error: {e}");
+                                    // we don't care if the receiver has dropped
+                                    let _ = completion_tx.send(Err(RpcHandlerError::BadInputBytes));
+                                    continue
+                                }
+                            }.to_vec();
+
+                            debug!("Sending RPC call to server");
+
+                            match stream.send(Message::Binary(binary)).await {
+                                Ok(_) => (),
+                                Err(e) => {
+                                    warn!("Failed to send RPC call. Ignoring. Error: {e}");
+                                    // we don't care if the receiver has dropped
+                                    let _ = completion_tx.send(Err(RpcHandlerError::ClientNotConnected));
+                                    continue
+                                }
+                            }
+
+                            debug!("RPC call sent to server");
+
+                            active_rpc_calls[id] = Some(completion_tx);
+                        } else {
+                            warn!("No free RPC id available. Responding with an error.");
+                            let _ = completion_tx.send(Err(RpcHandlerError::TooManyCallsInFlight));
+                        }
+                    }
+                    // await RPC responses from the server
+                    Some(msg) = stream.next() => {
+                        if let Ok(msg) = msg {
+                            if let Message::Binary(bytes) = msg {
+                                let msg: ServerMessage = match rkyv::from_bytes(&bytes) {
+                                    Ok(msg) => msg,
+                                    Err(e) => {
+                                        warn!("Received invalid RPC response. Ignoring. Error: {e}");
+                                        continue;
+                                    }
+                                };
+                                match msg {
+                                    ServerMessage::RPCResponse { id, output } => {
+                                        let span = span!(Level::DEBUG, "rpc", id = %id);
+                                        let _enter = span.enter();
+                                        debug!("Received RPC response from server");
+                                        if let Some(completion_tx) = active_rpc_calls[id as usize].take() {
+                                            let _ = completion_tx.send(output);
+                                        } else {
+                                            warn!("Received RPC response for unknown RPC call. Ignoring.");
+                                        }
+                                    }
+                                    ServerMessage::StateChange(changes) => {
+                                        let span = span!(Level::DEBUG, "state_change");
+                                        let _enter = span.enter();
+                                        debug!("Received {} state change(s) from server", changes.len());
+                                        if let Err(e) = self.state.apply_changes(changes) {
+                                            warn!("Failed to apply state changes. Error: {:?}", e);
+                                        };
+                                    }
+                                    ServerMessage::NewEvent { .. } => {
+                                        warn!("NewEvent has not been implemented yet. Ignoring.")
                                     }
                                 }
-                                ServerMessage::StateChange(changes) => {
-                                    let span = span!(Level::DEBUG, "state_change");
-                                    let _enter = span.enter();
-                                    debug!("Received {} state change(s) from server", changes.len());
-                                    if let Err(e) = self.state.apply_changes(changes) {
-                                        warn!("Failed to apply state changes. Error: {:?}", e);
-                                    };
-                                }
-                                ServerMessage::NewEvent { .. } => {
-                                    warn!("NewEvent has not been implemented yet. Ignoring.")
-                                }
                             }
                         }
                     }
-                }
-                // await shutdown signal
-                _ = &mut shutdown => {
-                    break;
+                    // await shutdown signal
+                    _ = &mut shutdown => {
+                        debug!("Application sent shutdown, breaking handler loop.");
+                        break;
+                    }
                 }
             }
-        }
 
-        debug!("RPC handler loop exited.");
-        Ok(())
-    }
+            if let Err(e) = stream.close(None).await {
+                warn!("Failed to nicely close WS: {e}");
+            } else {
+                debug!("Closed WS")
+            }
 
-    pub fn state(&self) -> &T {
-        &self.state
+            debug!("RPC handler loop exited.");
+            Ok(())
+        }.instrument(connection_span).await
     }
 }
 
