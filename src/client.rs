@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc, time::SystemTime, fmt::Debug};
+use std::{fmt::Debug, str::FromStr, sync::Arc, time::SystemTime};
 
 use futures_util::{SinkExt, StreamExt};
 use rustls_native_certs::load_native_certs;
@@ -20,7 +20,7 @@ use tokio_tungstenite::{
     },
     Connector,
 };
-use tracing::{debug, error, span, warn, Level, Instrument};
+use tracing::{debug, error, span, warn, Instrument, Level};
 use version::Version;
 
 use crate::{
@@ -221,6 +221,7 @@ where
                                         let _enter = span.enter();
                                         debug!("Received RPC response from server");
                                         if let Some(completion_tx) = active_rpc_calls[id as usize].take() {
+                                            debug!("Attempting send to application");
                                             let _ = completion_tx.send(output);
                                         } else {
                                             warn!("Received RPC response for unknown RPC call. Ignoring.");
@@ -250,9 +251,9 @@ where
             }
 
             if let Err(e) = stream.close(None).await {
-                warn!("Failed to nicely close WS: {e}");
+                warn!("Failed to nicely close stream: {e}");
             } else {
-                debug!("Closed WS")
+                debug!("Closed stream");
             }
 
             debug!("RPC handler loop exited.");
