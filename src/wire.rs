@@ -1,4 +1,4 @@
-use rkyv::{Archive, Serialize, Deserialize, CheckBytes};
+use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 
 #[derive(Archive, Serialize, Deserialize)]
 #[archive_attr(derive(CheckBytes))]
@@ -53,10 +53,6 @@ pub enum RpcHandlerError {
     BadInputBytes,
     /// The output bytes for the RPC call were invalid.
     BadOutputBytes,
-    /// The connection state was poisoned. This means that the connection
-    /// state was dropped while it was locked. This is a fatal error.
-    /// If the runtime receives this error, it will close the connection.
-    StatePoisoned,
     /// You tried to make an RPC call before your client was connected
     ClientNotConnected,
     /// You've tried to make too many RPC calls at once.
