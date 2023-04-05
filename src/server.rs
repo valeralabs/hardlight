@@ -10,7 +10,6 @@ use tokio::{
 };
 use tokio_rustls::{
     rustls::{Certificate, PrivateKey, ServerConfig as TLSServerConfig},
-    server::TlsStream,
     TlsAcceptor,
 };
 use tokio_tungstenite::{
@@ -117,25 +116,25 @@ where
 
         loop {
             let (stream, peer_addr) = listener.accept().await?;
-            let acceptor = acceptor.clone();
-            let span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
-            async move {
-                if let Ok(stream) = acceptor.accept(stream).await {
-                    debug!("Successfully terminated TLS handshake");
-                    self.handle_connection(stream, peer_addr);
-                }
-            }.instrument(span).await
+            self.handle_connection(stream, acceptor.clone(), peer_addr);
         }
     }
-
-    fn handle_connection(&self, stream: TlsStream<TcpStream>, peer_addr: SocketAddr) {
+    
+    fn handle_connection(&self, stream: TcpStream, acceptor: TlsAcceptor, peer_addr: SocketAddr) {
         let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
         let handler = (self.factory)(state_change_tx);
         let version: HeaderValue = self.hl_version_string.clone();
         tokio::spawn(async move {
             let connection_span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
-
+            
             async move {
+                let stream = match acceptor.accept(stream).await {
+                    Ok(stream) => stream,
+                    Err(_) => return,
+                };
+                
+                debug!("Successfully terminated TLS handshake");
+
                 let callback = |req: &Request, mut response: Response| {
                     // request is only valid if req.headers().get("Sec-WebSocket-Protocol") is
                     // Some(req_version) AND req_version == version
