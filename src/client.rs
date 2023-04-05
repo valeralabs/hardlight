@@ -33,13 +33,19 @@ pub struct ClientConfig {
     host: String,
 }
 
-pub trait State {
+pub trait ClientState {
     fn apply_changes(&mut self, changes: Vec<(String, Vec<u8>)>) -> HandlerResult<()>;
 }
 
+/// The [RpcResponseSender] is used to send the response of an RPC call back to
+/// the application. When an application sends an RPC call to the server, it
+/// will provide a serialized RPC call (method + args) and one of these senders.
+/// The application will await the response on the receiver side of the channel.
+pub type RpcResponseSender = oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>;
+
 pub struct Client<T>
 where
-    T: State + Default + Debug,
+    T: ClientState + Default + Debug,
 {
     config: ClientConfig,
     state: T,
@@ -48,7 +54,7 @@ where
 
 impl<T> Client<T>
 where
-    T: State + Default + Debug,
+    T: ClientState + Default + Debug,
 {
     /// Creates a new client that doesn't verify the server's certificate.
     pub fn new_self_signed(host: &str) -> Self {
@@ -97,7 +103,11 @@ where
         // Sends control channels to the application so it can send RPC calls,
         // events, and other things to the server.
         control_channels_tx: oneshot::Sender<(
-            mpsc::Sender<(Vec<u8>, oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>)>,
+            // rpc sender - app can send multiple RPC requests consisting of:
+            //            <-----> serialized RPC call (includes method + args)
+            //                     <--------------->
+            //                     client will send the RPC's response on this channel
+            mpsc::Sender<(Vec<u8>, RpcResponseSender)>,
         )>,
     ) -> Result<(), Error> {
         let connection_span = span!(Level::DEBUG, "connection", host = self.config.host);
@@ -105,17 +115,7 @@ where
         async move {
             let connector = Connector::Rustls(Arc::new(self.config.tls.clone()));
 
-            let req = Request::builder()
-                .method("GET")
-                .header("Host", self.config.host.clone())
-                .header("Connection", "Upgrade")
-                .header("Upgrade", "websocket")
-                .header("Sec-WebSocket-Version", "13")
-                .header("Sec-WebSocket-Key", generate_key())
-                .header("Sec-WebSocket-Protocol", self.hl_version_string.clone())
-                .uri(format!("wss://{}/", self.config.host))
-                .body(())
-                .expect("Failed to build request");
+            let req = Request::builder().method("GET").header("Host", self.config.host.clone()).header("Connection", "Upgrade").header("Upgrade", "websocket").header("Sec-WebSocket-Version", "13").header("Sec-WebSocket-Key", generate_key()).header("Sec-WebSocket-Protocol", self.hl_version_string.clone()).uri(format!("wss://{}/", self.config.host)).body(()).expect("Failed to build request");
 
             debug!("Connecting to server...");
             let (mut stream, res) = connect_async_tls_with_config(req, None, Some(connector)).await?;
@@ -124,38 +124,17 @@ where
             if protocol.is_none() || protocol.unwrap() != &self.hl_version_string {
                 error!("Received bad version from server. Wanted {:?}, got {:?}", self.hl_version_string, protocol);
                 return Err(Error::Protocol(ProtocolError::HandshakeIncomplete));
+            } else {
+                debug!("HardLight connection established ({})", protocol.unwrap().to_str().unwrap());
             }
-            
-            debug!("Connected to server.");
+
             debug!("Sending control channels to application...");
             let (rpc_tx, mut rpc_rx) = mpsc::channel(10);
-
             control_channels_tx.send((rpc_tx,)).unwrap();
             debug!("Control channels sent.");
 
             // keep track of active RPC calls
-            // we have to do this dumb thing because we can't copy a oneshot::Sender
-            let mut active_rpc_calls: [Option<oneshot::Sender<Result<Vec<u8>, RpcHandlerError>>>; 256] = [
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None, None, None,
-            ];
+            let mut active_rpc_calls: [Option<RpcResponseSender>; 256] = [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None];
 
             debug!("Starting RPC handler loop");
             loop {
@@ -258,7 +237,9 @@ where
 
             debug!("RPC handler loop exited.");
             Ok(())
-        }.instrument(connection_span).await
+        }
+        .instrument(connection_span)
+        .await
     }
 }
 

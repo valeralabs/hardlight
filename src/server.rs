@@ -31,10 +31,10 @@ pub type StateUpdateChannel = mpsc::Sender<Vec<(String, Vec<u8>)>>;
 
 pub type HandlerResult<T> = Result<T, RpcHandlerError>;
 
-/// A [Handler] will be created for each connection to the server.
+/// A [ServerHandler] will be created for each connection to the server.
 /// These are user-defined structs that respond to RPC calls
 #[async_trait]
-pub trait Handler {
+pub trait ServerHandler {
     /// Create a new handler using the given state update channel.
     fn new(state_update_channel: StateUpdateChannel) -> Self
     where
@@ -83,7 +83,7 @@ pub const HL_VERSION: &str = version!();
 /// The HardLight server, using tokio & tungstenite.
 pub struct Server<T>
 where
-    T: Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync>,
+    T: Fn(StateUpdateChannel) -> Box<dyn ServerHandler + Send + Sync>,
     T: Send + Sync + 'static + Copy,
 {
     /// The server's configuration.
@@ -97,7 +97,7 @@ where
 
 impl<T> Server<T>
 where
-    T: Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync>,
+    T: Fn(StateUpdateChannel) -> Box<dyn ServerHandler + Send + Sync>,
     T: Send + Sync + 'static + Copy,
 {
     pub fn new(config: ServerConfig, factory: T) -> Self {
@@ -119,20 +119,20 @@ where
             self.handle_connection(stream, acceptor.clone(), peer_addr);
         }
     }
-    
+
     fn handle_connection(&self, stream: TcpStream, acceptor: TlsAcceptor, peer_addr: SocketAddr) {
         let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
         let handler = (self.factory)(state_change_tx);
         let version: HeaderValue = self.hl_version_string.clone();
         tokio::spawn(async move {
             let connection_span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
-            
+
             async move {
                 let stream = match acceptor.accept(stream).await {
                     Ok(stream) => stream,
                     Err(_) => return,
                 };
-                
+
                 debug!("Successfully terminated TLS handshake");
 
                 let callback = |req: &Request, mut response: Response| {
@@ -146,10 +146,7 @@ where
                     } else {
                         let headers = response.headers_mut();
                         headers.append("Sec-WebSocket-Protocol", version);
-                        debug!(
-                            "Received valid handshake, upgrading connection to HardLight ({})",
-                            req_version.unwrap().to_str().unwrap()
-                        );
+                        debug!("Received valid handshake, upgrading connection to HardLight ({})", req_version.unwrap().to_str().unwrap());
                         Ok(response)
                     }
                 };
@@ -251,7 +248,9 @@ where
                         }
                     }
                 }
-            }.instrument(connection_span).await
+            }
+            .instrument(connection_span)
+            .await
         });
     }
 }
