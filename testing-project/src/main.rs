@@ -3,18 +3,58 @@
 use async_trait::async_trait;
 use hardlight::{
     tungstenite, Client, ClientState, HandlerResult, RpcHandlerError, RpcResponseSender, Server,
-    ServerConfig, ServerHandler, StateUpdateChannel,
+    ServerConfig, ServerHandler, StateUpdateChannel, Topic,
 };
 use parking_lot::{Mutex, MutexGuard};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
-use tokio::select;
 use tokio::sync::{mpsc, oneshot};
+use tokio::{select, sync::broadcast};
 use tracing::{debug, error, info};
 
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
+
+#[async_trait]
+trait TopicHandler {
+    fn new(channel: broadcast::Sender<Vec<u8>>, topic: Topic) -> Self
+    where
+        Self: Sized;
+    async fn handle(&mut self);
+}
+
+struct EventMonitor {
+    channel: broadcast::Sender<Vec<u8>>,
+    topic: Topic,
+}
+
+#[async_trait]
+impl TopicHandler for EventMonitor {
+    fn new(channel: broadcast::Sender<Vec<u8>>, topic: Topic) -> Self {
+        Self { channel, topic }
+    }
+
+    async fn handle(&mut self) {
+        loop {
+            let event = Event::Increment(1);
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            let bytes = rkyv::to_bytes::<Event, 1024>(&event).unwrap();
+            self.channel.send(bytes.to_vec()).unwrap();
+        }
+    }
+}
+
+impl EventMonitor {
+    /// An easier way to get the channel factory
+    fn init() -> impl Fn(broadcast::Sender<Vec<u8>>, Topic) -> Box<dyn TopicHandler + Send + Sync>
+           + Send
+           + Sync
+           + 'static
+           + Copy {
+        |channel, topic| Box::new(EventMonitor::new(channel, topic))
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -23,6 +63,7 @@ async fn main() -> Result<(), std::io::Error> {
     let config = ServerConfig::new_self_signed("localhost:8080");
     info!("{:?}", config);
     let mut server = CounterServer::new(config);
+    // server.add_topic_handler(EventMonitor::init()).await;
     server.start().await.unwrap();
 
     // wait for the server to start
@@ -32,12 +73,12 @@ async fn main() -> Result<(), std::io::Error> {
     client.connect().await.unwrap();
 
     let _ = client.increment(1).await;
-    
+
     client.disconnect(); // demonstrate that we can disconnect and reconnect
     server.stop();
     server.start().await.unwrap();
     client.connect().await.unwrap(); // note: state is reset as we're using a new connection
-    
+
     let num_tasks = 1;
     let num_increments_per_task = 1;
     info!("Incrementing counter using {num_tasks} tasks with {num_increments_per_task} increments each");
@@ -97,10 +138,18 @@ struct State {
     counter: u32,
 }
 
-// enum Events {
-//     Increment(u32),
-//     Decrement(u32),
-// }
+#[derive(Archive, Serialize, Deserialize)]
+#[archive_attr(derive(CheckBytes))]
+enum Event {
+    Increment(u32),
+    Decrement(u32),
+}
+
+#[derive(Archive, Serialize, Deserialize)]
+#[archive_attr(derive(CheckBytes))]
+enum TopicTypes {
+    Account(String),
+}
 
 #[async_trait]
 impl Counter for Handler {
@@ -108,6 +157,7 @@ impl Counter for Handler {
         // lock the state to the current thread
         let mut state: StateGuard = self.state.lock();
         state.counter += amount;
+        // self.subscribe("test".to_string()).await;
         Ok(state.counter)
     } // state is automatically unlocked here; any changes are sent to the client
       // automagically ✨
@@ -139,7 +189,7 @@ enum RpcCall {
 }
 
 ////////////////////////////////// SERVER CODE /////////////////////////////////
- 
+
 struct CounterServer {
     config: ServerConfig,
     // events: mpsc::Sender<()>
@@ -149,7 +199,11 @@ struct CounterServer {
 
 impl CounterServer {
     pub fn new(config: ServerConfig) -> Self {
-        Self { config, shutdown: None, control_channels: None }
+        Self {
+            config,
+            shutdown: None,
+            control_channels: None,
+        }
     }
 
     pub async fn start(&mut self) -> Result<(), std::io::Error> {
@@ -185,6 +239,7 @@ impl CounterServer {
             None => {}
         }
     }
+    pub async fn send(event: Event, topic: String) {}
 }
 
 /// RPC server that implements the [Counter] trait. A wrapper around
@@ -192,22 +247,32 @@ impl CounterServer {
 struct Handler {
     // the runtime will provide the state when it creates the handler
     state: Arc<StateController>,
+    subscription_tx: mpsc::Sender<Topic>,
 }
 
 impl Handler {
     /// An easier way to get the channel factory
     fn init(
-    ) -> impl Fn(StateUpdateChannel) -> Box<dyn ServerHandler + Send + Sync> + Send + Sync + 'static + Copy
-    {
-        |state_update_channel| Box::new(Self::new(state_update_channel))
+    ) -> impl Fn(StateUpdateChannel, mpsc::Sender<Topic>) -> Box<dyn ServerHandler + Send + Sync>
+           + Send
+           + Sync
+           + 'static
+           + Copy {
+        |state_update_channel, subscription_tx| {
+            Box::new(Handler::new(state_update_channel, subscription_tx))
+        }
     }
 }
 
 #[async_trait]
 impl ServerHandler for Handler {
-    fn new(state_update_channel: StateUpdateChannel) -> Self {
+    fn new(
+        state_update_channel: StateUpdateChannel,
+        subscription_tx: mpsc::Sender<Topic>,
+    ) -> Self {
         Self {
             state: Arc::new(StateController::new(state_update_channel)),
+            subscription_tx,
         }
     }
 
@@ -231,6 +296,14 @@ impl ServerHandler for Handler {
                 Ok(result.to_vec())
             }
         }
+    }
+
+    async fn subscribe(&self, topic: Topic) -> HandlerResult<()> {
+        Ok(self
+            .subscription_tx
+            .send(topic)
+            .await
+            .map_err(|_| RpcHandlerError::FailedToSubscribeToTopic)?)
     }
 }
 
