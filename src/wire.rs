@@ -57,4 +57,6 @@ pub enum RpcHandlerError {
     ClientNotConnected,
     /// You've tried to make too many RPC calls at once.
     TooManyCallsInFlight,
+    /// Failed to subscribe client to a topic.
+    FailedToSubscribeToTopic,
 }

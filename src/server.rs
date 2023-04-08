@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{collections::HashMap, io, net::SocketAddr, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -6,7 +6,10 @@ use rcgen::generate_simple_self_signed;
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
-    sync::{mpsc, oneshot, broadcast},
+    sync::{
+        broadcast::{self, error::TryRecvError},
+        mpsc, oneshot,
+    },
 };
 use tokio_rustls::{
     rustls::{Certificate, PrivateKey, ServerConfig as TLSServerConfig},
@@ -23,7 +26,7 @@ use tokio_tungstenite::{
 use tracing::{debug, info, span, warn, Instrument, Level};
 use version::{version, Version};
 
-use crate::wire::{ClientMessage, RpcHandlerError, ServerMessage};
+use crate::{wire::{ClientMessage, RpcHandlerError, ServerMessage}, Topic};
 
 /// A tokio MPSC channel that is used to send state updates to the runtime.
 /// The runtime will then send these updates to the client.
@@ -36,7 +39,7 @@ pub type HandlerResult<T> = Result<T, RpcHandlerError>;
 #[async_trait]
 pub trait ServerHandler {
     /// Create a new handler using the given state update channel.
-    fn new(state_update_channel: StateUpdateChannel) -> Self
+    fn new(state_update_channel: StateUpdateChannel, subscription_tx: mpsc::Sender<Topic>) -> Self
     where
         Self: Sized;
     /// Handle an RPC call (method + arguments) from the client.
@@ -45,6 +48,7 @@ pub trait ServerHandler {
     // Currently disabled because we can't use impl Trait in traits yet. (https://github.com/rust-lang/rust/issues/91611)
     // fn init() -> impl Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync> +
     // Send + Sync + 'static + Copy;
+    async fn subscribe(&self, topic: Topic) -> HandlerResult<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -66,10 +70,8 @@ impl ServerConfig {
                     PrivateKey(cert.serialize_private_key_der()),
                 )
                 .expect("failed to create TLS config")
-            }
-        )
+        })
     }
-
 
     pub fn new(host: &str, tls: TLSServerConfig) -> Self {
         Self {
@@ -82,10 +84,16 @@ impl ServerConfig {
 
 pub const HL_VERSION: &str = version!();
 
+// pub type HandlerFactory = impl Fn(broadcast::Sender<Vec<u8>>, String) ->
+// Box<dyn TopicHandler + Send + Sync> + Send
+// + Sync
+// + 'static
+// + Copy;
+
 /// The HardLight server, using tokio & tungstenite.
 pub struct Server<T>
 where
-    T: Fn(StateUpdateChannel) -> Box<dyn ServerHandler + Send + Sync>,
+    T: Fn(StateUpdateChannel, mpsc::Sender<Topic>) -> Box<dyn ServerHandler + Send + Sync>,
     T: Send + Sync + 'static + Copy,
 {
     /// The server's configuration.
@@ -93,24 +101,28 @@ where
     /// A closure that creates a new handler for each connection.
     /// The closure is passed a [StateUpdateChannel] that the handler can use to
     /// send state updates to the runtime.
-    pub factory: T,
+    pub rpc_factory: T,
     pub hl_version_string: HeaderValue,
 }
 
 impl<T> Server<T>
 where
-    T: Fn(StateUpdateChannel) -> Box<dyn ServerHandler + Send + Sync>,
+    T: Fn(StateUpdateChannel, mpsc::Sender<Topic>) -> Box<dyn ServerHandler + Send + Sync>,
     T: Send + Sync + 'static + Copy,
 {
     pub fn new(config: ServerConfig, factory: T) -> Self {
         Self {
             hl_version_string: format!("hl/{}", config.version_major).parse().unwrap(),
             config,
-            factory,
+            rpc_factory: factory,
         }
     }
 
-    pub async fn run(&self, mut shutdown: oneshot::Receiver<()>, control_channels_tx: oneshot::Sender<()>) -> io::Result<()> {
+    pub async fn run(
+        &self,
+        mut shutdown: oneshot::Receiver<()>,
+        control_channels_tx: oneshot::Sender<()>,
+    ) -> io::Result<()> {
         info!("Booting HL server v{}...", HL_VERSION);
         let acceptor = TlsAcceptor::from(Arc::new(self.config.tls.clone()));
         let listener = TcpListener::bind(&self.config.address).await?;
@@ -121,6 +133,10 @@ where
         // broadcast: many senders, many receivers
         let (shutdown_tx, _) = broadcast::channel(1);
         control_channels_tx.send(()).unwrap();
+
+        let mut event_channels: HashMap<Topic, broadcast::Sender<Vec<u8>>> = HashMap::new();
+        let (event_subscription_tx, mut event_subscription_rx) = mpsc::channel(10);
+
         loop {
             select! {
                 _ = &mut shutdown => {
@@ -130,14 +146,36 @@ where
                     };
                     return Ok(());
                 }
-                Ok((stream, peer_addr)) = listener.accept() => self.handle_connection(stream, acceptor.clone(), peer_addr, broadcast::Sender::subscribe(&shutdown_tx))
+                Ok((stream, peer_addr)) = listener.accept() => self.handle_connection(stream, acceptor.clone(), peer_addr, shutdown_tx.subscribe(), event_subscription_tx.clone()),
+                Some((topic, receiver_sender)) = event_subscription_rx.recv() => {
+                    if let Some(sender) = event_channels.get(&topic) {
+                        // already a topic handler for this topic, just send the receiver
+                        receiver_sender.send(sender.subscribe()).unwrap();
+                        continue;
+                    } else {
+                        // we need to spawn a new topic handler
+                        let (sender, receiver) = broadcast::channel(10);
+                        event_channels.insert(topic.clone(), sender);
+                    }
+                }
             }
         }
     }
 
-    fn handle_connection(&self, stream: TcpStream, acceptor: TlsAcceptor, peer_addr: SocketAddr, mut shutdown: broadcast::Receiver<()>) {
+    fn handle_connection(
+        &self,
+        stream: TcpStream,
+        acceptor: TlsAcceptor,
+        peer_addr: SocketAddr,
+        mut shutdown: broadcast::Receiver<()>,
+        event_subscription_tx: mpsc::Sender<(
+            Topic,
+            oneshot::Sender<broadcast::Receiver<Vec<u8>>>,
+        )>,
+    ) {
         let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
-        let handler = (self.factory)(state_change_tx);
+        let (topic_subscription_tx, mut topic_subscription_rx) = mpsc::channel(10);
+        let handler = (self.rpc_factory)(state_change_tx, topic_subscription_tx);
         let version: HeaderValue = self.hl_version_string.clone();
         tokio::spawn(async move {
             let connection_span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
@@ -178,6 +216,8 @@ where
 
                 // keep track of active RPC calls
                 let mut in_flight = [false; u8::MAX as usize + 1];
+
+                let mut event_subscriptions = vec![];
 
                 let (rpc_tx, mut rpc_rx) = mpsc::channel(u8::MAX as usize + 1);
 
@@ -261,10 +301,40 @@ where
                                 }
                             };
                         }
+                        Some(topic) = topic_subscription_rx.recv() => {
+                            let (tx, rx) = oneshot::channel();
+                            event_subscription_tx.send((topic, tx)).await.unwrap();
+                            match rx.await {
+                                Ok(event_receiver) => event_subscriptions.push(event_receiver),
+                                Err(e) => warn!("Error subscribing to event topic: {}", e),
+                            };
+                        }
                         // await shutdown signal
                         _ = shutdown.recv() => {
                             debug!("Received shutdown signal. Closing connection...");
                             return;
+                        }
+                    }
+
+                    // await any events from event subscriptions
+                    for event_receiver in event_subscriptions.iter_mut() {
+                        match event_receiver.try_recv() {
+                            Ok(event) => {
+                                let binary = rkyv::to_bytes::<ServerMessage, 1024>(&ServerMessage::NewEvent{ event }).unwrap().to_vec();
+                                match ws_stream.send(Message::Binary(binary)).await {
+                                    Ok(_) => debug!("Event sent."),
+                                    Err(e) => {
+                                        warn!("Error sending event to client: {}", e);
+                                        continue
+                                    }
+                                };
+                            }
+                            Err(TryRecvError::Empty) => continue,
+                            Err(TryRecvError::Closed) => {
+                                warn!("Event subscription closed unexpectedly");
+                                continue;
+                            }
+                            Err(TryRecvError::Lagged(_)) => unreachable!("Event subscription should never lag"),
                         }
                     }
                 }
