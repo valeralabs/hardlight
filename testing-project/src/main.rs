@@ -22,11 +22,8 @@ async fn main() -> Result<(), std::io::Error> {
 
     let config = ServerConfig::new_self_signed("localhost:8080");
     info!("{:?}", config);
-    let server = Server::new(config, Handler::init());
-
-    tokio::spawn(async move {
-        let _ = server.run().await;
-    });
+    let mut server = CounterServer::new(config);
+    server.start().await.unwrap();
 
     // wait for the server to start
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -37,6 +34,8 @@ async fn main() -> Result<(), std::io::Error> {
     let _ = client.increment(1).await;
     
     client.disconnect(); // demonstrate that we can disconnect and reconnect
+    server.stop();
+    server.start().await.unwrap();
     client.connect().await.unwrap(); // note: state is reset as we're using a new connection
     
     let num_tasks = 1;
@@ -140,6 +139,53 @@ enum RpcCall {
 }
 
 ////////////////////////////////// SERVER CODE /////////////////////////////////
+ 
+struct CounterServer {
+    config: ServerConfig,
+    // events: mpsc::Sender<()>
+    shutdown: Option<oneshot::Sender<()>>,
+    control_channels: Option<()>,
+}
+
+impl CounterServer {
+    pub fn new(config: ServerConfig) -> Self {
+        Self { config, shutdown: None, control_channels: None }
+    }
+
+    pub async fn start(&mut self) -> Result<(), std::io::Error> {
+        let server = Server::new(self.config.clone(), Handler::init());
+        let (error_tx, error_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (control_channels_tx, control_channels_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            if let Err(e) = server.run(shutdown_rx, control_channels_tx).await {
+                error_tx.send(e).unwrap()
+            };
+        });
+
+        select! {
+            e = error_rx => {
+                error!("Server error: {:?}", e);
+                return Err(e.unwrap());
+            }
+            control_channels = control_channels_rx => {
+                self.control_channels = Some(control_channels.unwrap());
+                self.shutdown = Some(shutdown_tx);
+                Ok(())
+            }
+        }
+    }
+    pub fn stop(&mut self) {
+        debug!("Telling server to shutdown");
+        match self.shutdown.take() {
+            Some(shutdown) => {
+                let _ = shutdown.send(());
+            }
+            None => {}
+        }
+    }
+}
 
 /// RPC server that implements the [Counter] trait. A wrapper around
 /// [hardlight::Server]
