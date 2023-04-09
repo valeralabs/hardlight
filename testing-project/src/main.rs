@@ -2,8 +2,8 @@
 // see: https://github.com/rust-lang/rust/issues/91611
 use async_trait::async_trait;
 use hardlight::{
-    tungstenite, Client, ClientState, HandlerResult, RpcHandlerError, RpcResponseSender, Server,
-    ServerConfig, ServerHandler, StateUpdateChannel,
+    tungstenite, Client, ClientState, HandlerResult, RpcHandlerError,
+    RpcResponseSender, Server, ServerConfig, ServerHandler, StateUpdateChannel,
 };
 use parking_lot::{Mutex, MutexGuard};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
@@ -32,12 +32,14 @@ async fn main() -> Result<(), std::io::Error> {
     client.connect().await.unwrap();
 
     let _ = client.increment(1).await;
-    
+
     client.disconnect(); // demonstrate that we can disconnect and reconnect
     server.stop();
     server.start().await.unwrap();
     client.connect().await.unwrap(); // note: state is reset as we're using a new connection
-    
+
+    assert!(client.get().await.unwrap() == 0);
+
     let num_tasks = 1;
     let num_increments_per_task = 1;
     info!("Incrementing counter using {num_tasks} tasks with {num_increments_per_task} increments each");
@@ -139,7 +141,7 @@ enum RpcCall {
 }
 
 ////////////////////////////////// SERVER CODE /////////////////////////////////
- 
+
 struct CounterServer {
     config: ServerConfig,
     // events: mpsc::Sender<()>
@@ -149,7 +151,11 @@ struct CounterServer {
 
 impl CounterServer {
     pub fn new(config: ServerConfig) -> Self {
-        Self { config, shutdown: None, control_channels: None }
+        Self {
+            config,
+            shutdown: None,
+            control_channels: None,
+        }
     }
 
     pub async fn start(&mut self) -> Result<(), std::io::Error> {
@@ -197,8 +203,11 @@ struct Handler {
 impl Handler {
     /// An easier way to get the channel factory
     fn init(
-    ) -> impl Fn(StateUpdateChannel) -> Box<dyn ServerHandler + Send + Sync> + Send + Sync + 'static + Copy
-    {
+    ) -> impl Fn(StateUpdateChannel) -> Box<dyn ServerHandler + Send + Sync>
+           + Send
+           + Sync
+           + 'static
+           + Copy {
         |state_update_channel| Box::new(Self::new(state_update_channel))
     }
 }
@@ -211,8 +220,12 @@ impl ServerHandler for Handler {
         }
     }
 
-    async fn handle_rpc_call(&self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError> {
-        let call: RpcCall = rkyv::from_bytes(input).map_err(|_| RpcHandlerError::BadInputBytes)?;
+    async fn handle_rpc_call(
+        &self,
+        input: &[u8],
+    ) -> Result<Vec<u8>, RpcHandlerError> {
+        let call: RpcCall = rkyv::from_bytes(input)
+            .map_err(|_| RpcHandlerError::BadInputBytes)?;
 
         match call {
             RpcCall::Increment { amount } => {
@@ -378,7 +391,9 @@ impl CounterClient {
                 Client::new(&host)
             };
 
-            if let Err(e) = client.connect(shutdown_rx, control_channels_tx).await {
+            if let Err(e) =
+                client.connect(shutdown_rx, control_channels_tx).await
+            {
                 error_tx.send(e).unwrap()
             };
         });
@@ -439,32 +454,38 @@ impl Drop for CounterClient {
 impl Counter for CounterClient {
     async fn increment(&self, amount: u32) -> HandlerResult<u32> {
         match self.make_rpc_call(RpcCall::Increment { amount }).await {
-            Ok(c) => rkyv::from_bytes(&c).map_err(|_| RpcHandlerError::BadOutputBytes),
+            Ok(c) => rkyv::from_bytes(&c)
+                .map_err(|_| RpcHandlerError::BadOutputBytes),
             Err(e) => Err(e),
         }
     }
     async fn decrement(&self, amount: u32) -> HandlerResult<u32> {
         match self.make_rpc_call(RpcCall::Decrement { amount }).await {
-            Ok(c) => rkyv::from_bytes(&c).map_err(|_| RpcHandlerError::BadOutputBytes),
+            Ok(c) => rkyv::from_bytes(&c)
+                .map_err(|_| RpcHandlerError::BadOutputBytes),
             Err(e) => Err(e),
         }
     }
     // We'll deprecate this at some point as we can just send it using Events
     async fn get(&self) -> HandlerResult<u32> {
         match self.make_rpc_call(RpcCall::Get).await {
-            Ok(c) => rkyv::from_bytes(&c).map_err(|_| RpcHandlerError::BadOutputBytes),
+            Ok(c) => rkyv::from_bytes(&c)
+                .map_err(|_| RpcHandlerError::BadOutputBytes),
             Err(e) => Err(e),
         }
     }
 }
 
 impl ClientState for State {
-    fn apply_changes(&mut self, changes: Vec<(String, Vec<u8>)>) -> HandlerResult<()> {
+    fn apply_changes(
+        &mut self,
+        changes: Vec<(String, Vec<u8>)>,
+    ) -> HandlerResult<()> {
         for (field, new_value) in changes {
             match field.as_ref() {
                 "counter" => {
-                    self.counter =
-                        rkyv::from_bytes(&new_value).map_err(|_| RpcHandlerError::BadInputBytes)?
+                    self.counter = rkyv::from_bytes(&new_value)
+                        .map_err(|_| RpcHandlerError::BadInputBytes)?
                 }
                 _ => {}
             }

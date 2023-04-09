@@ -6,7 +6,7 @@ use rcgen::generate_simple_self_signed;
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
-    sync::{mpsc, oneshot, broadcast},
+    sync::{broadcast, mpsc, oneshot},
 };
 use tokio_rustls::{
     rustls::{Certificate, PrivateKey, ServerConfig as TLSServerConfig},
@@ -40,11 +40,14 @@ pub trait ServerHandler {
     where
         Self: Sized;
     /// Handle an RPC call (method + arguments) from the client.
-    async fn handle_rpc_call(&self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError>;
+    async fn handle_rpc_call(
+        &self,
+        input: &[u8],
+    ) -> Result<Vec<u8>, RpcHandlerError>;
     // An easy way to get the handler factory.
     // Currently disabled because we can't use impl Trait in traits yet. (https://github.com/rust-lang/rust/issues/91611)
-    // fn init() -> impl Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync> +
-    // Send + Sync + 'static + Copy;
+    // fn init() -> impl Fn(StateUpdateChannel) -> Box<dyn Handler + Send +
+    // Sync> + Send + Sync + 'static + Copy;
 }
 
 #[derive(Debug, Clone)]
@@ -66,10 +69,8 @@ impl ServerConfig {
                     PrivateKey(cert.serialize_private_key_der()),
                 )
                 .expect("failed to create TLS config")
-            }
-        )
+        })
     }
-
 
     pub fn new(host: &str, tls: TLSServerConfig) -> Self {
         Self {
@@ -91,8 +92,8 @@ where
     /// The server's configuration.
     pub config: ServerConfig,
     /// A closure that creates a new handler for each connection.
-    /// The closure is passed a [StateUpdateChannel] that the handler can use to
-    /// send state updates to the runtime.
+    /// The closure is passed a [StateUpdateChannel] that the handler can use
+    /// to send state updates to the runtime.
     pub factory: T,
     pub hl_version_string: HeaderValue,
 }
@@ -104,13 +105,19 @@ where
 {
     pub fn new(config: ServerConfig, factory: T) -> Self {
         Self {
-            hl_version_string: format!("hl/{}", config.version_major).parse().unwrap(),
+            hl_version_string: format!("hl/{}", config.version_major)
+                .parse()
+                .unwrap(),
             config,
             factory,
         }
     }
 
-    pub async fn run(&self, mut shutdown: oneshot::Receiver<()>, control_channels_tx: oneshot::Sender<()>) -> io::Result<()> {
+    pub async fn run(
+        &self,
+        mut shutdown: oneshot::Receiver<()>,
+        control_channels_tx: oneshot::Sender<()>,
+    ) -> io::Result<()> {
         info!("Booting HL server v{}...", HL_VERSION);
         let acceptor = TlsAcceptor::from(Arc::new(self.config.tls.clone()));
         let listener = TcpListener::bind(&self.config.address).await?;
@@ -135,12 +142,19 @@ where
         }
     }
 
-    fn handle_connection(&self, stream: TcpStream, acceptor: TlsAcceptor, peer_addr: SocketAddr, mut shutdown: broadcast::Receiver<()>) {
+    fn handle_connection(
+        &self,
+        stream: TcpStream,
+        acceptor: TlsAcceptor,
+        peer_addr: SocketAddr,
+        mut shutdown: broadcast::Receiver<()>,
+    ) {
         let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
         let handler = (self.factory)(state_change_tx);
         let version: HeaderValue = self.hl_version_string.clone();
         tokio::spawn(async move {
-            let connection_span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
+            let connection_span =
+                span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
 
             async move {
                 let stream = match acceptor.accept(stream).await {

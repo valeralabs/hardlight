@@ -34,7 +34,10 @@ pub struct ClientConfig {
 }
 
 pub trait ClientState {
-    fn apply_changes(&mut self, changes: Vec<(String, Vec<u8>)>) -> HandlerResult<()>;
+    fn apply_changes(
+        &mut self,
+        changes: Vec<(String, Vec<u8>)>,
+    ) -> HandlerResult<()>;
 }
 
 /// The [RpcResponseSender] is used to send the response of an RPC call back to
@@ -60,7 +63,9 @@ where
     pub fn new_self_signed(host: &str) -> Self {
         let tls = TLSClientConfig::builder()
             .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {}))
+            .with_custom_certificate_verifier(Arc::new(
+                NoCertificateVerification {},
+            ))
             .with_no_client_auth();
         let config = ClientConfig {
             tls,
@@ -106,11 +111,13 @@ where
             // rpc sender - app can send multiple RPC requests consisting of:
             //            <-----> serialized RPC call (includes method + args)
             //                     <--------------->
-            //                     client will send the RPC's response on this channel
+            //                     client will send the RPC's response on this
+            // channel
             mpsc::Sender<(Vec<u8>, RpcResponseSender)>,
         )>,
     ) -> Result<(), Error> {
-        let connection_span = span!(Level::DEBUG, "connection", host = self.config.host);
+        let connection_span =
+            span!(Level::DEBUG, "connection", host = self.config.host);
 
         async move {
             let connector = Connector::Rustls(Arc::new(self.config.tls.clone()));
