@@ -26,7 +26,10 @@ use tokio_tungstenite::{
 use tracing::{debug, info, span, warn, Instrument, Level};
 use version::{version, Version};
 
-use crate::{wire::{ClientMessage, RpcHandlerError, ServerMessage}, Topic};
+use crate::{
+    wire::{ClientMessage, RpcHandlerError, ServerMessage},
+    Topic,
+};
 
 /// A tokio MPSC channel that is used to send state updates to the runtime.
 /// The runtime will then send these updates to the client.
@@ -39,15 +42,21 @@ pub type HandlerResult<T> = Result<T, RpcHandlerError>;
 #[async_trait]
 pub trait ServerHandler {
     /// Create a new handler using the given state update channel.
-    fn new(state_update_channel: StateUpdateChannel, subscription_tx: mpsc::Sender<Topic>) -> Self
+    fn new(
+        state_update_channel: StateUpdateChannel,
+        subscription_tx: mpsc::Sender<Topic>,
+    ) -> Self
     where
         Self: Sized;
     /// Handle an RPC call (method + arguments) from the client.
-    async fn handle_rpc_call(&self, input: &[u8]) -> Result<Vec<u8>, RpcHandlerError>;
+    async fn handle_rpc_call(
+        &self,
+        input: &[u8],
+    ) -> Result<Vec<u8>, RpcHandlerError>;
     // An easy way to get the handler factory.
     // Currently disabled because we can't use impl Trait in traits yet. (https://github.com/rust-lang/rust/issues/91611)
-    // fn init() -> impl Fn(StateUpdateChannel) -> Box<dyn Handler + Send + Sync> +
-    // Send + Sync + 'static + Copy;
+    // fn init() -> impl Fn(StateUpdateChannel) -> Box<dyn Handler + Send +
+    // Sync> + Send + Sync + 'static + Copy;
     async fn subscribe(&self, topic: Topic) -> HandlerResult<()>;
 }
 
@@ -93,26 +102,34 @@ pub const HL_VERSION: &str = version!();
 /// The HardLight server, using tokio & tungstenite.
 pub struct Server<T>
 where
-    T: Fn(StateUpdateChannel, mpsc::Sender<Topic>) -> Box<dyn ServerHandler + Send + Sync>,
+    T: Fn(
+        StateUpdateChannel,
+        mpsc::Sender<Topic>,
+    ) -> Box<dyn ServerHandler + Send + Sync>,
     T: Send + Sync + 'static + Copy,
 {
     /// The server's configuration.
     pub config: ServerConfig,
     /// A closure that creates a new handler for each connection.
-    /// The closure is passed a [StateUpdateChannel] that the handler can use to
-    /// send state updates to the runtime.
+    /// The closure is passed a [StateUpdateChannel] that the handler can use
+    /// to send state updates to the runtime.
     pub rpc_factory: T,
     pub hl_version_string: HeaderValue,
 }
 
 impl<T> Server<T>
 where
-    T: Fn(StateUpdateChannel, mpsc::Sender<Topic>) -> Box<dyn ServerHandler + Send + Sync>,
+    T: Fn(
+        StateUpdateChannel,
+        mpsc::Sender<Topic>,
+    ) -> Box<dyn ServerHandler + Send + Sync>,
     T: Send + Sync + 'static + Copy,
 {
     pub fn new(config: ServerConfig, factory: T) -> Self {
         Self {
-            hl_version_string: format!("hl/{}", config.version_major).parse().unwrap(),
+            hl_version_string: format!("hl/{}", config.version_major)
+                .parse()
+                .unwrap(),
             config,
             rpc_factory: factory,
         }
@@ -134,8 +151,10 @@ where
         let (shutdown_tx, _) = broadcast::channel(1);
         control_channels_tx.send(()).unwrap();
 
-        let mut event_channels: HashMap<Topic, broadcast::Sender<Vec<u8>>> = HashMap::new();
-        let (event_subscription_tx, mut event_subscription_rx) = mpsc::channel(10);
+        let mut event_channels: HashMap<Topic, broadcast::Sender<Vec<u8>>> =
+            HashMap::new();
+        let (event_subscription_tx, mut event_subscription_rx) =
+            mpsc::channel(10);
 
         loop {
             select! {
@@ -174,11 +193,14 @@ where
         )>,
     ) {
         let (state_change_tx, mut state_change_rx) = mpsc::channel(10);
-        let (topic_subscription_tx, mut topic_subscription_rx) = mpsc::channel(10);
-        let handler = (self.rpc_factory)(state_change_tx, topic_subscription_tx);
+        let (topic_subscription_tx, mut topic_subscription_rx) =
+            mpsc::channel(10);
+        let handler =
+            (self.rpc_factory)(state_change_tx, topic_subscription_tx);
         let version: HeaderValue = self.hl_version_string.clone();
         tokio::spawn(async move {
-            let connection_span = span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
+            let connection_span =
+                span!(Level::DEBUG, "connection", peer_addr = %peer_addr);
 
             async move {
                 let stream = match acceptor.accept(stream).await {

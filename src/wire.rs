@@ -6,10 +6,10 @@ pub enum ClientMessage {
     /// A message from the client when it calls a method on the server.
     RPCRequest {
         /// A unique counter for each RPC call.
-        /// This is used to match responses to requests. It restricts the number
-        /// of concurrent operations to 256. Active operations cannot
-        /// reuse the same ID, therefore IDs of completed requests can
-        /// be reused.
+        /// This is used to match responses to requests. It restricts the
+        /// number of concurrent operations to 256. Active operations
+        /// cannot reuse the same ID, therefore IDs of completed
+        /// requests can be reused.
         id: u8,
         /// The internal message serialized with rkyv. This will include the
         /// method name and arguments. The format of this message will slightly
@@ -25,10 +25,10 @@ pub enum ServerMessage {
     /// A message from the server with the output of a client's method call.
     RPCResponse {
         /// A unique counter for each RPC call.
-        /// This is used to match responses to requests. It restricts the number
-        /// of concurrent operations to 256. Active operations cannot
-        /// reuse the same ID, therefore IDs of completed requests can
-        /// be reused.
+        /// This is used to match responses to requests. It restricts the
+        /// number of concurrent operations to 256. Active operations
+        /// cannot reuse the same ID, therefore IDs of completed
+        /// requests can be reused.
         id: u8,
         /// The function's output serialized with rkyv. The format of this
         /// message will differ with each application.
