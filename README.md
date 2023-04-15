@@ -44,15 +44,15 @@ At Valera, we use HardLight to connect clients to our servers, and for connectin
 
 ## Usage
 
-HardLight is designed to be simple, secure and fast. We take advantage of Rust's trait system to allow you to define your own RPC methods, and then use the `#[derive(RPC)]` macro to generate the necessary code to make it work.
+HardLight is designed to be simple, secure and fast. We take advantage of Rust's trait system to allow you to define your own RPC methods, and then use the `#[rpc(State)]` macro to generate the necessary code to make it work.
 
 Here's a very simple example of a counter service:
 
 ```rust
-use hardlight::{RPC, ConnectionState};
+use hardlight::{rpc, connection_state};
 
 /// These RPC methods are executed on the server and can be called by clients.
-#[derive(RPC)]
+#[rpc(State)]
 trait Counter {
     async fn increment(&self, amount: u32) -> u32;
     async fn decrement(&self, amount: u32) -> u32;
@@ -63,7 +63,7 @@ trait Counter {
 /// In reality, you'd probably want to store this in a database and use subscriptions
 /// to push updates to clients. Connection state is ephemeral (per connection)
 /// and is not persisted.
-#[derive(ConnectionState)]
+#[connection_state]
 struct State {
     counter: u32,
 }
@@ -71,7 +71,7 @@ struct State {
 
 The `Counter` trait is shared between clients and servers. Any inputs or outputs have to support rkyv's `Serialize`, `Deserialize`, `Archive` and `CheckBytes` traits. This means you can use any primitive type, or any type that implements these traits.
 
-The `#[derive(RPC)]` macro will generate:
+The `#[rpc(State)]` macro will generate:
 
 - a `Client` struct
 - a `Handler` struct
