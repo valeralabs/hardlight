@@ -15,8 +15,6 @@ While there isn't an official "specification", we take a similar approach to Bit
 
 ## Features
 
-- **Feature sets**: depending on the context, certain endpoints can be disabled or enabled
-  - Example: An unauthenticated client only has access to RPC methods to authenticate, and reconnects with authentication with the full set of RPC methods
 - **Concurrent RPC**: up to 256 RPC calls can be occuring at the same time on a single connection
   - This doesn't include subscriptions, for which there are no hard limits
 - **Subscriptions**: the server can push events to clients
@@ -54,9 +52,9 @@ use hardlight::{rpc, connection_state};
 /// These RPC methods are executed on the server and can be called by clients.
 #[rpc(State)]
 trait Counter {
-    async fn increment(&self, amount: u32) -> u32;
-    async fn decrement(&self, amount: u32) -> u32;
-    async fn get(&self) -> u32;
+    async fn increment(&self, amount: u32) -> HandlerResult<u32>;
+    async fn decrement(&self, amount: u32) -> HandlerResult<u32>;
+    async fn get(&self) -> HandlerResult<u32>;
 }
 
 /// We store the counter in connection state (so each connection has its own counter)
@@ -75,9 +73,7 @@ The `#[rpc(State)]` macro will generate:
 
 - a `Client` struct
 - a `Handler` struct
-- an enum, `Method`, of all the RPC method identifiers (e.g. `Increment`, `Decrement`, `Get`)
-- input structs for each RPC method (e.g. `struct IncrementInput { amount: u32 }`)
-- output types for each RPC method (e.g. `type IncrementOutput = u32`)
+- an enum, `RpcCall`, of all the RPC method identifiers and their arguments (e.g. `Increment`, `Decrement`, `Get`)
 
 You'd be encouraged to put this trait in a separate crate or module, so you can use `Counter::Handler` and `Counter::Client` etc.
 
@@ -116,22 +112,23 @@ You then `impl Counter for Handler` to add your functionality. For example:
 
 ```rust
 impl Counter for Handler {
-    async fn increment(&self, amount: u32) -> u32 {
+    async fn increment(&self, amount: u32) -> HandlerResult<u32> {
         // lock the state to the current thread
-        let mut state = self.state.lock().unwrap();
+        let mut state: StateGuard = self.state.lock();
         state.counter += amount;
-        counter
-    } // state is automatically unlocked here; any changes are sent to the client automagically ✨
+        Ok(state.counter)
+    } // state is automatically unlocked here; any changes are sent to the client
+      // automagically ✨
 
-    async fn decrement(&self, amount: u32) -> u32 {
-        let mut state = self.state.lock().unwrap();
+    async fn decrement(&self, amount: u32) -> HandlerResult<u32> {
+        let mut state = self.state.lock();
         state.counter -= amount;
-        counter
+        Ok(state.counter)
     }
 
-    async fn get(&self) -> u32 {
-        let state = self.state.lock().unwrap();
-        state.counter
+    async fn get(&self) -> HandlerResult<u32> {
+        let state = self.state.lock();
+        Ok(state.counter)
     }
 }
 ```
