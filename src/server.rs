@@ -50,6 +50,13 @@ pub trait ServerHandler {
     // Sync> + Send + Sync + 'static + Copy;
 }
 
+#[async_trait]
+pub trait ApplicationServer {
+    fn new(config: ServerConfig) -> Self;
+    async fn start(&mut self) -> Result<(), std::io::Error>;
+    fn stop(&mut self);
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub address: String,

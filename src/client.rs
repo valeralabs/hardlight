@@ -1,5 +1,6 @@
 use std::{fmt::Debug, str::FromStr, sync::Arc, time::SystemTime};
 
+use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use rustls_native_certs::load_native_certs;
 use tokio::{
@@ -16,7 +17,7 @@ use tokio_tungstenite::{
         error::ProtocolError,
         handshake::client::generate_key,
         http::{HeaderValue, Request},
-        Error, Message,
+        Error, Message, self,
     },
     Connector,
 };
@@ -40,6 +41,14 @@ pub trait ClientState {
         &mut self,
         changes: Vec<(usize, Vec<u8>)>,
     ) -> HandlerResult<()>;
+}
+
+#[async_trait]
+pub trait ApplicationClient {
+    fn new_self_signed(host: &str) -> Self;
+    fn new(host: &str) -> Self;
+    async fn connect(&mut self) -> Result<(), tungstenite::Error>;
+    fn disconnect(&mut self);
 }
 
 /// The [RpcResponseSender] is used to send the response of an RPC call back to
