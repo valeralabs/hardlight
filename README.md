@@ -2,6 +2,16 @@
 
 A secure, real-time, low-latency binary WebSocket RPC subprotocol.
 
+[![Crates.io](https://img.shields.io/crates/v/hardlight)](https://crates.io/crates/hardlight)
+[![Docs.rs](https://docs.rs/hardlight/badge.svg)](https://docs.rs/hardlight)
+
+**NOTE:** HardLight is currently in unstable development. The API, wire protocol and features are subject to change. See below for the current progress.
+
+
+## What is HardLight?
+
+HardLight is a binary WebSocket RPC subprotocol. It's designed to be faster (lower latencies, bigger capacity) than gRPC while being easier to use and secure by default. It's built on top of [rkyv](https://rkyv.org), a zero-copy deserialization library, and [tokio-tungstenite](https://github.com/snapview/tokio-tungstenite) (for server/client implementations).
+
 HardLight has two data models:
 
 - RPC: a client connects to a server, and can call functions on the server
@@ -12,6 +22,40 @@ An example: multiple clients subscribe to a "chat" event using Events. The conne
 HardLight is named after the fictional [Forerunner technology](https://www.halopedia.org/Hard_light) that "allows light to be transformed into a solid state, capable of bearing weight and performing a variety of tasks".
 
 While there isn't an official "specification", we take a similar approach to Bitcoin Core, where the protocol is defined by the implementation. This implementation should be considered the "reference implementation" of the protocol, and ports should match the behaviour of this implementation.
+
+### Feature tracking
+
+All features will be completed for 1.0.0 apart from those marked with an asterisk.
+
+- [ ] RPC (from @617a7a)
+  - [x] Connection state
+    - [x] `connection_state` macro
+    - [x] client state
+    - [x] mutex'd server state
+    - [x] server state autosync
+  - [ ] RPC macro **[IN PROGRESS]**
+    - [ ] `#[rpc(State)]` macro
+    - [ ] `#[rpc(State, Event)]` macro
+  - [ ] client
+    - [x] self-signed TLS
+    - [ ] wasm client*
+    - [x] version agreement
+    - [x] run in background
+  - [x] server
+    - [x] version agreement
+    - [x] run in background
+- [ ] Events (from @beast4coder)
+  - [ ] finish scoping out API **[IN PROGRESS]**
+  - [x] wire support
+  - [ ] client
+    - [ ] event hooks of some variation
+    - [ ] wasm client*
+  - [ ] server
+    - [ ] multi-connection topic management
+      - [ ] retrieve broadcast receivers from main server
+      - [ ] create topic handlers for server-scoped unique topics
+      - [ ] clean up topic handlers with no subscribers
+    - [ ] subscribe/unsubscribe a connection to a topic from server-side RPC handlers
 
 ## Features
 
