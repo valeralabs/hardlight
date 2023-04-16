@@ -1,12 +1,8 @@
-# HardLight
+# HardLight [![Crates.io](https://img.shields.io/crates/v/hardlight)](https://crates.io/crates/hardlight) [![Docs.rs](https://docs.rs/hardlight/badge.svg)](https://docs.rs/hardlight)
 
 A secure, real-time, low-latency binary WebSocket RPC subprotocol.
 
-[![Crates.io](https://img.shields.io/crates/v/hardlight)](https://crates.io/crates/hardlight)
-[![Docs.rs](https://docs.rs/hardlight/badge.svg)](https://docs.rs/hardlight)
-
-**NOTE:** HardLight is currently in unstable development. The API, wire protocol and features are subject to change. See below for the current progress.
-
+**NOTE:** HardLight is currently in unstable development. The API, wire protocol and features are subject to change. See [below](#feature-tracking) for the current progress.
 
 ## What is HardLight?
 
@@ -27,7 +23,7 @@ While there isn't an official "specification", we take a similar approach to Bit
 
 All features will be completed for 1.0.0 apart from those marked with an asterisk.
 
-- [ ] RPC (from @617a7a)
+- [ ] RPC (from [@617a7a](https://github.com/617a7a))
   - [x] Connection state
     - [x] `connection_state` macro
     - [x] client state
@@ -44,7 +40,7 @@ All features will be completed for 1.0.0 apart from those marked with an asteris
   - [x] server
     - [x] version agreement
     - [x] run in background
-- [ ] Events (from @beast4coder)
+- [ ] Events (from [@beast4coder](https://github.com/beast4coder))
   - [ ] finish scoping out API **[IN PROGRESS]**
   - [x] wire support
   - [ ] client
