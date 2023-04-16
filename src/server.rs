@@ -27,7 +27,7 @@ use crate::wire::{ClientMessage, RpcHandlerError, ServerMessage};
 
 /// A tokio MPSC channel that is used to send state updates to the runtime.
 /// The runtime will then send these updates to the client.
-pub type StateUpdateChannel = mpsc::Sender<Vec<(String, Vec<u8>)>>;
+pub type StateUpdateChannel = mpsc::Sender<Vec<(usize, Vec<u8>)>>;
 
 pub type HandlerResult<T> = Result<T, RpcHandlerError>;
 

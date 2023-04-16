@@ -1,6 +1,12 @@
-# HardLight
+# HardLight [![Crates.io](https://img.shields.io/crates/v/hardlight)](https://crates.io/crates/hardlight) [![Docs.rs](https://docs.rs/hardlight/badge.svg)](https://docs.rs/hardlight)
 
 A secure, real-time, low-latency binary WebSocket RPC subprotocol.
+
+**NOTE:** HardLight is currently in unstable development. The API, wire protocol and features are subject to change. See [below](#feature-tracking) for the current progress.
+
+## What is HardLight?
+
+HardLight is a binary WebSocket RPC subprotocol. It's designed to be faster (lower latencies, bigger capacity) than gRPC while being easier to use and secure by default. It's built on top of [rkyv](https://rkyv.org), a zero-copy deserialization library, and [tokio-tungstenite](https://github.com/snapview/tokio-tungstenite) (for server/client implementations).
 
 HardLight has two data models:
 
@@ -13,10 +19,42 @@ HardLight is named after the fictional [Forerunner technology](https://www.halop
 
 While there isn't an official "specification", we take a similar approach to Bitcoin Core, where the protocol is defined by the implementation. This implementation should be considered the "reference implementation" of the protocol, and ports should match the behaviour of this implementation.
 
+### Feature tracking
+
+All features will be completed for 1.0.0 apart from those marked with an asterisk.
+
+- [ ] RPC (from [@617a7a](https://github.com/617a7a))
+  - [x] Connection state
+    - [x] `connection_state` macro
+    - [x] client state
+    - [x] mutex'd server state
+    - [x] server state autosync
+  - [ ] RPC macro **[IN PROGRESS]**
+    - [ ] `#[rpc(State)]` macro
+    - [ ] `#[rpc(State, Event)]` macro
+  - [ ] client
+    - [x] self-signed TLS
+    - [ ] wasm client*
+    - [x] version agreement
+    - [x] run in background
+  - [x] server
+    - [x] version agreement
+    - [x] run in background
+- [ ] Events (from [@beast4coder](https://github.com/beast4coder))
+  - [ ] finish scoping out API **[IN PROGRESS]**
+  - [x] wire support
+  - [ ] client
+    - [ ] event hooks of some variation
+    - [ ] wasm client*
+  - [ ] server
+    - [ ] multi-connection topic management
+      - [ ] retrieve broadcast receivers from main server
+      - [ ] create topic handlers for server-scoped unique topics
+      - [ ] clean up topic handlers with no subscribers
+    - [ ] subscribe/unsubscribe a connection to a topic from server-side RPC handlers
+
 ## Features
 
-- **Feature sets**: depending on the context, certain endpoints can be disabled or enabled
-  - Example: An unauthenticated client only has access to RPC methods to authenticate, and reconnects with authentication with the full set of RPC methods
 - **Concurrent RPC**: up to 256 RPC calls can be occuring at the same time on a single connection
   - This doesn't include subscriptions, for which there are no hard limits
 - **Subscriptions**: the server can push events to clients
@@ -44,26 +82,26 @@ At Valera, we use HardLight to connect clients to our servers, and for connectin
 
 ## Usage
 
-HardLight is designed to be simple, secure and fast. We take advantage of Rust's trait system to allow you to define your own RPC methods, and then use the `#[derive(RPC)]` macro to generate the necessary code to make it work.
+HardLight is designed to be simple, secure and fast. We take advantage of Rust's trait system to allow you to define your own RPC methods, and then use the `#[rpc(State)]` macro to generate the necessary code to make it work.
 
 Here's a very simple example of a counter service:
 
 ```rust
-use hardlight::{RPC, ConnectionState};
+use hardlight::{rpc, connection_state};
 
 /// These RPC methods are executed on the server and can be called by clients.
-#[derive(RPC)]
+#[rpc(State)]
 trait Counter {
-    async fn increment(&self, amount: u32) -> u32;
-    async fn decrement(&self, amount: u32) -> u32;
-    async fn get(&self) -> u32;
+    async fn increment(&self, amount: u32) -> HandlerResult<u32>;
+    async fn decrement(&self, amount: u32) -> HandlerResult<u32>;
+    async fn get(&self) -> HandlerResult<u32>;
 }
 
 /// We store the counter in connection state (so each connection has its own counter)
 /// In reality, you'd probably want to store this in a database and use subscriptions
 /// to push updates to clients. Connection state is ephemeral (per connection)
 /// and is not persisted.
-#[derive(ConnectionState)]
+#[connection_state]
 struct State {
     counter: u32,
 }
@@ -71,13 +109,11 @@ struct State {
 
 The `Counter` trait is shared between clients and servers. Any inputs or outputs have to support rkyv's `Serialize`, `Deserialize`, `Archive` and `CheckBytes` traits. This means you can use any primitive type, or any type that implements these traits.
 
-The `#[derive(RPC)]` macro will generate:
+The `#[rpc(State)]` macro will generate:
 
 - a `Client` struct
 - a `Handler` struct
-- an enum, `Method`, of all the RPC method identifiers (e.g. `Increment`, `Decrement`, `Get`)
-- input structs for each RPC method (e.g. `struct IncrementInput { amount: u32 }`)
-- output types for each RPC method (e.g. `type IncrementOutput = u32`)
+- an enum, `RpcCall`, of all the RPC method identifiers and their arguments (e.g. `Increment`, `Decrement`, `Get`)
 
 You'd be encouraged to put this trait in a separate crate or module, so you can use `Counter::Handler` and `Counter::Client` etc.
 
@@ -116,22 +152,23 @@ You then `impl Counter for Handler` to add your functionality. For example:
 
 ```rust
 impl Counter for Handler {
-    async fn increment(&self, amount: u32) -> u32 {
+    async fn increment(&self, amount: u32) -> HandlerResult<u32> {
         // lock the state to the current thread
-        let mut state = self.state.lock().unwrap();
+        let mut state: StateGuard = self.state.lock();
         state.counter += amount;
-        counter
-    } // state is automatically unlocked here; any changes are sent to the client automagically ✨
+        Ok(state.counter)
+    } // state is automatically unlocked here; any changes are sent to the client
+      // automagically ✨
 
-    async fn decrement(&self, amount: u32) -> u32 {
-        let mut state = self.state.lock().unwrap();
+    async fn decrement(&self, amount: u32) -> HandlerResult<u32> {
+        let mut state = self.state.lock();
         state.counter -= amount;
-        counter
+        Ok(state.counter)
     }
 
-    async fn get(&self) -> u32 {
-        let state = self.state.lock().unwrap();
-        state.counter
+    async fn get(&self) -> HandlerResult<u32> {
+        let state = self.state.lock();
+        Ok(state.counter)
     }
 }
 ```

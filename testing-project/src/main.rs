@@ -2,19 +2,16 @@
 // see: https://github.com/rust-lang/rust/issues/91611
 use async_trait::async_trait;
 use hardlight::{
-    tungstenite, Client, ClientState, HandlerResult, RpcHandlerError,
-    RpcResponseSender, Server, ServerConfig, ServerHandler, StateUpdateChannel,
+    connection_state, tungstenite, Client, ClientState, HandlerResult,
+    RpcHandlerError, RpcResponseSender, Server, ServerConfig, ServerHandler,
+    StateUpdateChannel,
 };
-use parking_lot::{Mutex, MutexGuard};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info};
 
-use std::{
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -29,6 +26,7 @@ async fn main() -> Result<(), std::io::Error> {
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     let mut client = CounterClient::new_self_signed("localhost:8080");
+    // client.add_event_handler(EventMonitor::init()).await;
     client.connect().await.unwrap();
 
     let _ = client.increment(1).await;
@@ -86,6 +84,7 @@ async fn main() -> Result<(), std::io::Error> {
     Ok(())
 }
 
+// #[hardlight::RPC(State)]
 #[async_trait]
 trait Counter {
     async fn increment(&self, amount: u32) -> HandlerResult<u32>;
@@ -94,7 +93,7 @@ trait Counter {
     async fn get(&self) -> HandlerResult<u32>;
 }
 
-#[derive(Clone, Default, Debug)]
+#[connection_state]
 struct State {
     counter: u32,
 }
@@ -191,6 +190,7 @@ impl CounterServer {
             None => {}
         }
     }
+    // pub async fn send(event: Event, topic: String) {}
 }
 
 /// RPC server that implements the [Counter] trait. A wrapper around
@@ -244,102 +244,6 @@ impl ServerHandler for Handler {
                 Ok(result.to_vec())
             }
         }
-    }
-}
-
-/// The StateController is a server-side wrapper around the user's state. It
-/// manages the state under a [parking_lot::Mutex] and stores a [mpsc::Sender]
-/// to send any changes. This is accessable through self.state for RPC
-/// functions.
-struct StateController {
-    /// State is locked under an internal mutex so multiple threads can
-    /// use it safely
-    state: Mutex<State>,
-    /// The channel is given by the runtime when it creates the connection,
-    /// allowing us to tell the runtime when the connection's state is modified
-    /// so it can send the changes to the client automatically
-    channel: Arc<mpsc::Sender<Vec<(String, Vec<u8>)>>>,
-}
-
-impl StateController {
-    fn new(channel: StateUpdateChannel) -> Self {
-        Self {
-            // use default values for the state
-            state: Mutex::new(Default::default()),
-            channel: Arc::new(channel),
-        }
-    }
-
-    /// Locks the state to the current RPC handler by issuing a StateGuard.
-    /// When the StateGuard is dropped, it'll send any changes to the client.
-    fn lock(&self) -> StateGuard {
-        let state = self.state.lock();
-        StateGuard {
-            starting_state: state.clone(),
-            state,
-            channel: self.channel.clone(),
-        }
-    }
-}
-
-/// StateGuard wraps MutexGuard to send any changes back to the runtime when
-/// it's dropped.
-struct StateGuard<'a> {
-    /// The StateGuard is given ownership of a lock to the state
-    state: MutexGuard<'a, State>,
-    /// A copy of the state before we locked it
-    /// We use this to compare changes when the StateGuard is dropped
-    starting_state: State,
-    /// A channel pointer that we can use to send changes to the runtime
-    /// which will handle sending them to the client
-    channel: Arc<mpsc::Sender<Vec<(String, Vec<u8>)>>>,
-}
-
-impl<'a> Drop for StateGuard<'a> {
-    /// Our custom drop implementation will send any changes to the runtime
-    fn drop(&mut self) {
-        // "diff" the two states to see what changed
-        let mut changes = Vec::new();
-
-        if self.state.counter != self.starting_state.counter {
-            changes.push((
-                "counter".to_string(),
-                rkyv::to_bytes::<u32, 1024>(&self.state.counter)
-                    .unwrap()
-                    .to_vec(),
-            ));
-        }
-
-        // if there are no changes, don't bother sending anything
-        if changes.is_empty() {
-            return;
-        }
-
-        // send the changes to the runtime
-        // we have to spawn a new task because we can't await inside a drop
-        let channel = self.channel.clone();
-        tokio::spawn(async move {
-            // this could fail if the server shuts down before these
-            // changes are sent... but we're not too worried about that
-            let _ = channel.send(changes).await;
-        });
-    }
-}
-
-// the Deref and DerefMut traits allow us to use the StateGuard as if it were a
-// State by derefing to the Mutex's deref impl. This allows us to do
-// things like state.counter instead of state.state.counter
-impl Deref for StateGuard<'_> {
-    type Target = State;
-
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
-}
-
-impl DerefMut for StateGuard<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
     }
 }
 
@@ -473,23 +377,5 @@ impl Counter for CounterClient {
                 .map_err(|_| RpcHandlerError::BadOutputBytes),
             Err(e) => Err(e),
         }
-    }
-}
-
-impl ClientState for State {
-    fn apply_changes(
-        &mut self,
-        changes: Vec<(String, Vec<u8>)>,
-    ) -> HandlerResult<()> {
-        for (field, new_value) in changes {
-            match field.as_ref() {
-                "counter" => {
-                    self.counter = rkyv::from_bytes(&new_value)
-                        .map_err(|_| RpcHandlerError::BadInputBytes)?
-                }
-                _ => {}
-            }
-        }
-        Ok(())
     }
 }
