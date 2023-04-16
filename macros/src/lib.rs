@@ -27,20 +27,20 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
         #input_ast
 
         struct StateController {
-            state: std::sync::Mutex<#state_ident>,
+            state: parking_lot::Mutex<#state_ident>,
             channel: std::sync::Arc<tokio::sync::mpsc::Sender<Vec<(String, Vec<u8>)>>>,
         }
 
         impl StateController {
             fn new(channel: StateUpdateChannel) -> Self {
                 Self {
-                    state: std::sync::Mutex::new(Default::default()),
+                    state: parking_lot::Mutex::new(Default::default()),
                     channel: std::sync::Arc::new(channel),
                 }
             }
 
             fn lock(&self) -> StateGuard {
-                let state = self.state.lock().unwrap();
+                let state = self.state.lock();
                 StateGuard {
                     starting_state: state.clone(),
                     state,
@@ -50,7 +50,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
         }
 
         struct StateGuard<'a> {
-            state: std::sync::MutexGuard<'a, #state_ident>,
+            state: parking_lot::MutexGuard<'a, #state_ident>,
             starting_state: #state_ident,
             channel: std::sync::Arc<tokio::sync::mpsc::Sender<Vec<(String, Vec<u8>)>>>,
         }
