@@ -43,7 +43,7 @@ pub enum ServerMessage {
         event: Vec<u8>,
     },
     /// The server updates the connection state.
-    StateChange(Vec<(String, Vec<u8>)>),
+    StateChange(Vec<(usize, Vec<u8>)>),
 }
 
 #[derive(Archive, Serialize, Deserialize, Debug)]

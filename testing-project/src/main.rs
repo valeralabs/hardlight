@@ -2,17 +2,16 @@
 // see: https://github.com/rust-lang/rust/issues/91611
 use async_trait::async_trait;
 use hardlight::{
-    tungstenite, Client, ClientState, HandlerResult, RpcHandlerError,
-    RpcResponseSender, Server, ServerConfig, ServerHandler, StateUpdateChannel,
+    connection_state, tungstenite, Client, ClientState, HandlerResult,
+    RpcHandlerError, RpcResponseSender, Server, ServerConfig, ServerHandler,
+    StateUpdateChannel,
 };
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info};
 
-use std::{
-    sync::Arc,
-};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -94,7 +93,7 @@ trait Counter {
     async fn get(&self) -> HandlerResult<u32>;
 }
 
-#[hardlight::connection_state]
+#[connection_state]
 struct State {
     counter: u32,
 }

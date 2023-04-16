@@ -6,7 +6,6 @@ use syn::{parse_macro_input, DeriveInput};
 pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
     let input_ast = parse_macro_input!(input as DeriveInput);
     let state_ident = &input_ast.ident;
-    let (_, ty_generics, where_clause) = input_ast.generics.split_for_impl();
 
     let field_names: Vec<_> = match input_ast.data {
         syn::Data::Struct(ref data_struct) => data_struct
@@ -16,11 +15,8 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
             .collect(),
         _ => panic!("ConnectionState can only be derived on structs"),
     };
-    
-    let field_strings: Vec<_> = field_names
-        .iter()
-        .map(|name| name.to_string())
-        .collect();
+
+    let field_indices: Vec<_> = (0..field_names.len()).collect();
 
     let expanded = quote! {
         #[derive(Clone, Default, Debug)]
@@ -28,7 +24,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
         struct StateController {
             state: parking_lot::Mutex<#state_ident>,
-            channel: std::sync::Arc<tokio::sync::mpsc::Sender<Vec<(String, Vec<u8>)>>>,
+            channel: std::sync::Arc<tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
         }
 
         impl StateController {
@@ -52,28 +48,35 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
         struct StateGuard<'a> {
             state: parking_lot::MutexGuard<'a, #state_ident>,
             starting_state: #state_ident,
-            channel: std::sync::Arc<tokio::sync::mpsc::Sender<Vec<(String, Vec<u8>)>>>,
+            channel: std::sync::Arc<tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
         }
 
         impl<'a> Drop for StateGuard<'a> {
+            /// Our custom drop implementation will send any changes to the runtime
             fn drop(&mut self) {
+                // "diff" the two states to see what changed
                 let mut changes = Vec::new();
 
                 #(
                     if self.state.#field_names != self.starting_state.#field_names {
                         changes.push((
-                            #field_strings.to_string(),
+                            #field_indices,
                             rkyv::to_bytes::<_, 1024>(&self.state.#field_names).unwrap().to_vec(),
                         ));
                     }
                 )*
 
+                // if there are no changes, don't bother sending anything
                 if changes.is_empty() {
                     return;
                 }
 
+                // send the changes to the runtime
+                // we have to spawn a new task because we can't await inside a drop
                 let channel = self.channel.clone();
                 tokio::spawn(async move {
+                    // this could fail if the server shuts down before these
+                    // changes are sent... but we're not too worried about that
                     let _ = channel.send(changes).await;
                 });
             }
@@ -93,15 +96,15 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
 
-        impl ClientState for #state_ident #ty_generics #where_clause {
+        impl ClientState for State {
             fn apply_changes(
                 &mut self,
-                changes: Vec<(String, Vec<u8>)>,
+                changes: Vec<(usize, Vec<u8>)>,
             ) -> HandlerResult<()> {
-                for (field, new_value) in changes {
-                    match field.as_ref() {
+                for (field_index, new_value) in changes {
+                    match field_index {
                         #(
-                            #field_strings => {
+                            #field_indices => {
                                 self.#field_names = rkyv::from_bytes(&new_value)
                                     .map_err(|_| RpcHandlerError::BadInputBytes)?;
                             }

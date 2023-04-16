@@ -3,10 +3,10 @@ mod server;
 mod wire;
 
 pub use client::*;
+pub use hardlight_macros::*;
 pub use server::*;
 pub use tokio_tungstenite::tungstenite;
 pub use wire::*;
-pub use hardlight_macros::*;
 
 #[derive(Eq, PartialEq, Hash, Clone, Debug)]
 pub struct Topic(Vec<u8>);

@@ -28,6 +28,8 @@ use crate::{
     wire::{ClientMessage, RpcHandlerError, ServerMessage},
 };
 
+use array_init::array_init;
+
 pub struct ClientConfig {
     tls: TLSClientConfig,
     host: String,
@@ -36,7 +38,7 @@ pub struct ClientConfig {
 pub trait ClientState {
     fn apply_changes(
         &mut self,
-        changes: Vec<(String, Vec<u8>)>,
+        changes: Vec<(usize, Vec<u8>)>,
     ) -> HandlerResult<()>;
 }
 
@@ -141,7 +143,7 @@ where
             debug!("Control channels sent.");
 
             // keep track of active RPC calls
-            let mut active_rpc_calls: [Option<RpcResponseSender>; 256] = [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None];
+            let mut active_rpc_calls: [Option<RpcResponseSender>; 256] = array_init(|_| None);
 
             debug!("Starting RPC handler loop");
             loop {
