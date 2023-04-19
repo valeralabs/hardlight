@@ -67,7 +67,7 @@ async fn main() -> Result<(), std::io::Error> {
     let config = ServerConfig::new_self_signed("localhost:8080");
     info!("{:?}", config);
     let mut server = CounterServer::new(config);
-    // server.add_topic_handler(EventMonitor::init()).await;
+    //server.add_topic_handler(EventMonitor::init()).await;
     server.start().await.unwrap();
 
     // wait for the server to start
@@ -150,12 +150,12 @@ enum Event {
     Decrement(u32),
 }
 
-// |event: Event| {
-//     match event{
-//         Event::Increment(value) => {sdasdhasjd}
-//         Event::Decrement(value) => {sdasdhasjd}
-//     }
-// }
+    // |event: Event| {
+    //     match event{
+    //         Event::Increment(value) => value + 1
+    //         Event::Decrement(value) => {sdasdhasjd}
+    //     }
+    // }
 
 #[derive(Archive, Serialize, Deserialize)]
 #[archive_attr(derive(CheckBytes))]
