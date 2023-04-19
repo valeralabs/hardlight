@@ -151,4 +151,22 @@ UI <> Logic <> State <-------------> Logic <> State
 
 We provide handlers to HardLight that modify state inside the frontend. The UI logic then updates the UI layer based on the state.
 
-```rs
+The server uses a topic handler to subscribe a connection to a topic. Once the connection is subscribed, any changes made to the topic will be pushed down the connection to the client. As the topics aren't know at run time, (SOMETHING ABOUT ARC?). When an event occurs, the client can use the `Event` enum to match the event to logic.
+
+matts list:
+- server needs topic handler to subscribe the client
+- clients need event handler to be able to recieve event
+- how to add functions to client
+    - 
+- how to add functions to server
+    - 
+- **how does client recieve it**
+
+- demonstrative rust for how to use topic handler??
+- demonstrative rust for how to use event handler??
+- event enum implementation example
+
+```rust
+#[derive(Events)]
+
+```
