@@ -84,10 +84,19 @@ At Valera, we use HardLight to connect clients to our servers, and for connectin
 
 HardLight is designed to be simple, secure and fast. We take advantage of Rust's trait system to allow you to define your own RPC methods, and then use the `#[rpc(State)]` macro to generate the necessary code to make it work.
 
-Here's a very simple example of a counter service:
+Here's a very simple example of a counter server that stores an ephemeral counter per connection:
 
 ```rust
 use hardlight::{rpc, connection_state};
+
+#[tokio::main]
+async fn main() {
+    let config = ServerConfig::new_self_signed("localhost:8080");
+    info!("{:?}", config);
+    let mut server = CounterServer::new(config);
+    server.start().await.unwrap();
+    loop {}
+}
 
 /// These RPC methods are executed on the server and can be called by clients.
 #[rpc(State)]
