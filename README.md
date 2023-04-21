@@ -92,10 +92,9 @@ use hardlight::{rpc, connection_state};
 #[tokio::main]
 async fn main() {
     let config = ServerConfig::new_self_signed("localhost:8080");
-    info!("{:?}", config);
     let mut server = CounterServer::new(config);
     server.start().await.unwrap();
-    loop {}
+    loop {} // server runs in background by default
 }
 
 /// These RPC methods are executed on the server and can be called by clients.
@@ -106,10 +105,6 @@ trait Counter {
     async fn get(&self) -> HandlerResult<u32>;
 }
 
-/// We store the counter in connection state (so each connection has its own counter)
-/// In reality, you'd probably want to store this in a database and use subscriptions
-/// to push updates to clients. Connection state is ephemeral (per connection)
-/// and is not persisted.
 #[connection_state]
 struct State {
     counter: u32,
