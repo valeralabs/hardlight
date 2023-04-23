@@ -29,9 +29,9 @@ All features will be completed for 1.0.0 apart from those marked with an asteris
     - [x] client state
     - [x] mutex'd server state
     - [x] server state autosync
-  - [ ] RPC macro **[IN PROGRESS]**
-    - [ ] `#[rpc(State)]` macro
-    - [ ] `#[rpc(State, Event)]` macro
+  - [ ] RPC macro
+    - [x] `#[rpc]` macro
+    - [ ] `#[rpc(Event)]` macro
   - [ ] client
     - [x] self-signed TLS
     - [ ] wasm client*
@@ -57,7 +57,7 @@ All features will be completed for 1.0.0 apart from those marked with an asteris
 
 - **Concurrent RPC**: up to 256 RPC calls can be occuring at the same time on a single connection
   - This doesn't include subscriptions, for which there are no hard limits
-- **Subscriptions**: the server can push events to clients
+- **Events**: the server can push events to clients
 
 ## Install
 
