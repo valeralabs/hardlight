@@ -84,7 +84,7 @@ At Valera, we use HardLight to connect clients to our servers, and for connectin
 
 HardLight is designed to be simple, secure and fast. We take advantage of Rust's trait system to allow you to define your own RPC methods, and then use the `#[rpc(State)]` macro to generate the necessary code to make it work.
 
-Here's a very simple example of a counter service:
+Here's a very simple example of a counter server that stores an ephemeral counter per connection:
 
 ```rust
 use hardlight::*;
@@ -92,6 +92,14 @@ use hardlight::*;
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+    let config = ServerConfig::new_self_signed("localhost:8080");
+    let mut server = CounterServer::new(config);
+    server.start().await.unwrap();
+    loop {} // server runs in background by default
+}
+
+#[tokio::main]
+async fn main() {
     let config = ServerConfig::new_self_signed("localhost:8080");
     let mut server = CounterServer::new(config);
     server.start().await.unwrap();
@@ -172,33 +180,6 @@ Changes to connection state are sent to the client automatically without any ext
 4. We compare the current values to the previous state. Any differences are sent to the client by calling to the parent connection.
 
 As HardLight ultimately uses TCP, changes will properly happen in order, even if the client sends multiple RPC calls at once and packets are reordered.
-
-### Implementing a handler
-
-You then `impl Counter for Handler` to add your functionality. For example:
-
-```rust
-impl Counter for Handler {
-    async fn increment(&self, amount: u32) -> HandlerResult<u32> {
-        // lock the state to the current thread
-        let mut state: StateGuard = self.state.lock();
-        state.counter += amount;
-        Ok(state.counter)
-    } // state is automatically unlocked here; any changes are sent to the client
-      // automagically ✨
-
-    async fn decrement(&self, amount: u32) -> HandlerResult<u32> {
-        let mut state = self.state.lock();
-        state.counter -= amount;
-        Ok(state.counter)
-    }
-
-    async fn get(&self) -> HandlerResult<u32> {
-        let state = self.state.lock();
-        Ok(state.counter)
-    }
-}
-```
 
 ## Events
 
