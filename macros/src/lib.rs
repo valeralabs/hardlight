@@ -505,3 +505,17 @@ pub fn rpc_handler(
 
     proc_macro::TokenStream::from(expanded)
 }
+
+#[proc_macro_attribute]
+// takes any ast as an input and annotates it with rkyv's macros
+pub fn codable(_attr: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(item as syn::Item);
+
+    let expanded = quote! {
+        #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, PartialEq)]
+        #[archive_attr(derive(PartialEq, rkyv::CheckBytes))]
+        #input
+    };
+
+    proc_macro::TokenStream::from(expanded)
+}
