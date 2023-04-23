@@ -2,10 +2,18 @@ mod client;
 mod server;
 mod wire;
 
+pub use async_trait;
+pub use bytecheck;
 pub use client::*;
 pub use hardlight_macros::*;
+pub use parking_lot;
+pub use rkyv;
+pub use rkyv_derive;
 pub use server::*;
+pub use tokio;
+pub use tokio_macros;
 pub use tokio_tungstenite::tungstenite;
+pub use tracing;
 pub use wire::*;
 
 #[derive(Eq, PartialEq, Hash, Clone, Debug)]

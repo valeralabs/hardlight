@@ -87,23 +87,50 @@ HardLight is designed to be simple, secure and fast. We take advantage of Rust's
 Here's a very simple example of a counter service:
 
 ```rust
-use hardlight::{rpc, connection_state};
+use hardlight::*;
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt::init();
+    let config = ServerConfig::new_self_signed("localhost:8080");
+    let mut server = CounterServer::new(config);
+    server.start().await.unwrap();
+    loop {} // server runs in background by default
+}
 
 /// These RPC methods are executed on the server and can be called by clients.
-#[rpc(State)]
+#[rpc]
 trait Counter {
     async fn increment(&self, amount: u32) -> HandlerResult<u32>;
     async fn decrement(&self, amount: u32) -> HandlerResult<u32>;
     async fn get(&self) -> HandlerResult<u32>;
 }
 
-/// We store the counter in connection state (so each connection has its own counter)
-/// In reality, you'd probably want to store this in a database and use subscriptions
-/// to push updates to clients. Connection state is ephemeral (per connection)
-/// and is not persisted.
 #[connection_state]
 struct State {
     counter: u32,
+}
+
+#[rpc_handler]
+impl Counter for Handler {
+    async fn increment(&self, amount: u32) -> HandlerResult<u32> {
+        // lock the state to the current thread
+        let mut state: StateGuard = self.state.lock();
+        state.counter += amount;
+        Ok(state.counter)
+    } // state is automatically unlocked here; any changes are sent to the client
+      // automagically ✨
+
+    async fn decrement(&self, amount: u32) -> HandlerResult<u32> {
+        let mut state = self.state.lock();
+        state.counter -= amount;
+        Ok(state.counter)
+    }
+
+    async fn get(&self) -> HandlerResult<u32> {
+        let state = self.state.lock();
+        Ok(state.counter)
+    }
 }
 ```
 

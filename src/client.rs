@@ -14,10 +14,11 @@ use tokio_rustls::rustls::{
 use tokio_tungstenite::{
     connect_async_tls_with_config,
     tungstenite::{
+        self,
         error::ProtocolError,
         handshake::client::generate_key,
         http::{HeaderValue, Request},
-        Error, Message, self,
+        Error, Message,
     },
     Connector,
 };
