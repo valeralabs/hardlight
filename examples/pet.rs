@@ -10,29 +10,61 @@ async fn main() {
     let mut client = PetServiceClient::new_self_signed("localhost:8080");
     client.connect().await.unwrap();
 
-    client.become_dog("Rex".to_string(), 3, "German Shepherd".to_string()).await.unwrap();
-    println!("Rex says: {}", client.make_a_noise().await.unwrap().unwrap());
+    client
+        .become_dog("Rex".to_string(), 3, "German Shepherd".to_string())
+        .await
+        .unwrap();
+    println!(
+        "Rex says: {}",
+        client.make_a_noise().await.unwrap().unwrap()
+    );
 
-    client.become_cat("Mittens".to_string(), 2, "Tabby".to_string()).await.unwrap();
-    println!("Mittens says: {}", client.make_a_noise().await.unwrap().unwrap());
+    client
+        .become_cat("Mittens".to_string(), 2, "Tabby".to_string())
+        .await
+        .unwrap();
+    println!(
+        "Mittens says: {}",
+        client.make_a_noise().await.unwrap().unwrap()
+    );
 }
 
 #[rpc]
 trait PetService {
-    async fn become_dog(&self, name: String, age: u8, breed: String) -> HandlerResult<()>;
-    async fn become_cat(&self, name: String, age: u8, breed: String) -> HandlerResult<()>;
+    async fn become_dog(
+        &self,
+        name: String,
+        age: u8,
+        breed: String,
+    ) -> HandlerResult<()>;
+    async fn become_cat(
+        &self,
+        name: String,
+        age: u8,
+        breed: String,
+    ) -> HandlerResult<()>;
     async fn make_a_noise(&self) -> HandlerResult<Option<String>>;
 }
 
 #[rpc_handler]
 impl PetService for Handler {
-    async fn become_dog(&self, name: String, age: u8, breed: String) -> HandlerResult<()> {
+    async fn become_dog(
+        &self,
+        name: String,
+        age: u8,
+        breed: String,
+    ) -> HandlerResult<()> {
         let mut state = self.state.lock();
         state.pet = Some(Pet::Dog(Dog::new(name, age, breed)));
         Ok(())
     }
 
-    async fn become_cat(&self, name: String, age: u8, breed: String) -> HandlerResult<()> {
+    async fn become_cat(
+        &self,
+        name: String,
+        age: u8,
+        breed: String,
+    ) -> HandlerResult<()> {
         let mut state = self.state.lock();
         state.pet = Some(Pet::Cat(Cat::new(name, age, breed)));
         Ok(())
@@ -54,14 +86,12 @@ struct State {
 }
 
 #[codable]
-#[derive(Clone, Debug)]
 enum Pet {
     Dog(Dog),
     Cat(Cat),
 }
 
 #[codable]
-#[derive(Clone, Debug)]
 struct Dog {
     name: String,
     age: u8,
@@ -70,11 +100,7 @@ struct Dog {
 
 impl Dog {
     fn new(name: String, age: u8, breed: String) -> Self {
-        Self {
-            name,
-            age,
-            breed,
-        }
+        Self { name, age, breed }
     }
 
     fn bark(&self) -> String {
@@ -83,7 +109,6 @@ impl Dog {
 }
 
 #[codable]
-#[derive(Clone, Debug)]
 struct Cat {
     name: String,
     age: u8,
@@ -92,11 +117,7 @@ struct Cat {
 
 impl Cat {
     fn new(name: String, age: u8, breed: String) -> Self {
-        Self {
-            name,
-            age,
-            breed,
-        }
+        Self { name, age, breed }
     }
 
     fn meow(&self) -> String {
