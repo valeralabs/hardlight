@@ -1,28 +1,26 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, AttributeArgs, DeriveInput, ItemTrait};
+use syn::{parse_macro_input, AttributeArgs, ItemTrait, Ident, ItemStruct};
 
 #[proc_macro_attribute]
 pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
-    let input_ast = parse_macro_input!(input as DeriveInput);
+    let input_ast = parse_macro_input!(input as ItemStruct);
     let state_ident = &input_ast.ident;
+    let vis = &input_ast.vis;
 
-    let field_names: Vec<_> = match input_ast.data {
-        syn::Data::Struct(ref data_struct) => data_struct
-            .fields
-            .iter()
-            .map(|f| f.ident.as_ref().unwrap())
-            .collect(),
-        _ => panic!("ConnectionState can only be derived on structs"),
-    };
+    let field_names: Vec<&Ident> = input_ast
+        .fields
+        .iter()
+        .map(|field| field.ident.as_ref().unwrap())
+        .collect();
 
-    let field_indices: Vec<_> = (0..field_names.len()).collect();
+    let field_indices: Vec<usize> = (0..field_names.len()).collect();
 
     let expanded = quote! {
         #[derive(Clone, Default, Debug)]
         #input_ast
 
-        struct StateController {
+        #vis struct StateController {
             state: parking_lot::Mutex<#state_ident>,
             channel: std::sync::Arc<tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
         }
@@ -45,7 +43,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
 
-        struct StateGuard<'a> {
+        #vis struct StateGuard<'a> {
             state: parking_lot::MutexGuard<'a, #state_ident>,
             starting_state: #state_ident,
             channel: std::sync::Arc<tokio::sync::mpsc::Sender<Vec<(usize, Vec<u8>)>>>,
@@ -136,6 +134,7 @@ fn snake_to_pascal_case(s: &str) -> String {
 pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
     let _args = parse_macro_input!(args as AttributeArgs);
     let trait_input = parse_macro_input!(input as ItemTrait);
+    let vis = &trait_input.vis;
 
     let trait_ident = &trait_input.ident;
 
@@ -185,7 +184,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         #[derive(rkyv_derive::Archive, rkyv_derive::Serialize, rkyv_derive::Deserialize)]
         #[archive_attr(derive(bytecheck::CheckBytes))]
         #[repr(u8)]
-        enum RpcCall {
+        #vis enum RpcCall {
             #(#rpc_variants),*
         }
     };
@@ -194,7 +193,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         let server_struct_ident = format_ident!("{}Server", trait_ident);
 
         quote! {
-            struct #server_struct_ident {
+            #vis struct #server_struct_ident {
                 config: ServerConfig,
                 shutdown: Option<tokio::sync::oneshot::Sender<()>>,
                 control_channels: Option<()>,
@@ -284,7 +283,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             /// RPC server that implements the [Counter] trait. A wrapper around
             /// [Server]
-            struct Handler {
+            #vis struct Handler {
                 // the runtime will provide the state when it creates the handler
                 state: std::sync::Arc<StateController>,
             }
@@ -364,7 +363,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
 
         quote! {
             // CLIENT CODE
-            struct #client_name {
+            #vis struct #client_name {
                 host: String,
                 self_signed: bool,
                 shutdown: Option<tokio::sync::oneshot::Sender<()>>,
