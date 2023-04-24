@@ -91,15 +91,6 @@ use hardlight::*;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
-    let config = ServerConfig::new_self_signed("localhost:8080");
-    let mut server = CounterServer::new(config);
-    server.start().await.unwrap();
-    loop {} // server runs in background by default
-}
-
-#[tokio::main]
-async fn main() {
     let config = ServerConfig::new_self_signed("localhost:8080");
     let mut server = CounterServer::new(config);
     server.start().await.unwrap();
