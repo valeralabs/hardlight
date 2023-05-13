@@ -5,6 +5,7 @@ edition = "2021"
 description = "A secure, real-time, low-latency binary WebSocket RPC subprotocol. Likely the fastest web-compatible RPC framework ever built."
 authors = ["Azz <azz@valera.co>"]
 license = "MIT"
+repository = "https://github.com/valeralabs/hardlight"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
