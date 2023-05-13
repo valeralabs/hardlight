@@ -33,7 +33,7 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn lock(&self) -> StateGuard {
+            #vis fn lock(&self) -> StateGuard {
                 let state = self.state.lock();
                 StateGuard {
                     starting_state: state.clone(),
@@ -119,15 +119,21 @@ pub fn connection_state(_attr: TokenStream, input: TokenStream) -> TokenStream {
 }
 
 fn snake_to_pascal_case(s: &str) -> String {
-    s.split('_')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(f) => f.to_uppercase().chain(chars).collect(),
+    let mut result = String::with_capacity(s.len());
+    let mut capitalize_next = true;
+
+    s.chars().for_each(|c| {
+        match c {
+            '_' => capitalize_next = true,
+            _ if capitalize_next => {
+                result.extend(c.to_uppercase());
+                capitalize_next = false;
             }
-        })
-        .collect()
+            _ => result.push(c),
+        }
+    });
+
+    result
 }
 
 #[proc_macro_attribute]
@@ -137,6 +143,39 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
     let vis = &trait_input.vis;
 
     let trait_ident = &trait_input.ident;
+
+    // // rewrite trait input so all outputs are wrapped in HandlerResult
+    // let trait_items = trait_input.clone()
+    //     .items
+    //     .iter()
+    //     .map(|item| {
+    //         if let syn::TraitItem::Method(method) = item {
+    //             let output = &method.sig.output;
+    //             let output = quote! {
+    //                 -> HandlerResult<#output>
+    //             };
+    //             let mut method = method.clone();
+    //             method.sig.output = syn::parse2(output).unwrap();
+    //             syn::TraitItem::Method(method)
+    //         } else {
+    //             item.clone()
+    //         }
+    //     })
+    //     .collect::<Vec<_>>();
+
+    // let trait_input = syn::ItemTrait {
+    //     attrs: trait_input.attrs,
+    //     vis: vis.clone(),
+    //     unsafety: trait_input.unsafety,
+    //     auto_token: trait_input.auto_token,
+    //     trait_token: trait_input.trait_token,
+    //     ident: trait_ident.clone(),
+    //     generics: trait_input.generics,
+    //     colon_token: trait_input.colon_token,
+    //     supertraits: trait_input.supertraits,
+    //     brace_token: trait_input.brace_token,
+    //     items: trait_items,
+    // };
 
     // Generate RpcCall enum variants
     let rpc_variants = trait_input
@@ -285,7 +324,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
             /// [Server]
             #vis struct Handler {
                 // the runtime will provide the state when it creates the handler
-                state: std::sync::Arc<StateController>,
+                #vis state: std::sync::Arc<StateController>,
             }
 
             impl Handler {
@@ -523,4 +562,32 @@ pub fn codable(
     };
 
     proc_macro::TokenStream::from(expanded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_snake_to_pascal_case_empty() {
+        assert_eq!(snake_to_pascal_case(""), "");
+    }
+
+    #[test]
+    fn test_snake_to_pascal_case_single_word() {
+        assert_eq!(snake_to_pascal_case("hello"), "Hello");
+        assert_eq!(snake_to_pascal_case("world"), "World");
+    }
+
+    #[test]
+    fn test_snake_to_pascal_case_multiple_words() {
+        assert_eq!(snake_to_pascal_case("hello_world"), "HelloWorld");
+        assert_eq!(snake_to_pascal_case("foo_bar_baz"), "FooBarBaz");
+    }
+
+    #[test]
+    fn test_snake_to_pascal_case_mixed_case() {
+        assert_eq!(snake_to_pascal_case("hello_world_42"), "HelloWorld42");
+        assert_eq!(snake_to_pascal_case("foo_BAR_baz"), "FooBarBaz");
+    }
 }
