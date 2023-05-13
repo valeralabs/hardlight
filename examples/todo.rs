@@ -38,6 +38,8 @@ async fn main() {
 
     client.mark_as_done(vec![0, 1]).await.unwrap();
 
+    client.delete_done_tasks().await.unwrap();
+
     print_tasks(&client).await;
 
     client.delete_all().await.unwrap();
@@ -66,10 +68,11 @@ async fn print_tasks(client: &TodoClient) {
 trait Todo {
     async fn create(&self, task: Task) -> HandlerResult<u32>;
     async fn mark_as_done(&self, id: Vec<u32>) -> HandlerResult<()>;
-    async fn get(&self, ids: Vec<u32>) -> HandlerResult<Vec<Task>>;
-    async fn get_all(&self) -> HandlerResult<Vec<Task>>;
+    async fn get(&self, ids: Vec<u32>) -> HandlerResult<HashMap<u32, Task>>;
+    async fn get_all(&self) -> HandlerResult<HashMap<u32, Task>>;
     async fn delete(&self, ids: Vec<u32>) -> HandlerResult<()>;
     async fn delete_all(&self) -> HandlerResult<()>;
+    async fn delete_done_tasks(&self) -> HandlerResult<()>;
 }
 
 #[codable]
@@ -118,23 +121,19 @@ impl Todo for Handler {
         }
         Ok(())
     }
-    async fn get(&self, ids: Vec<u32>) -> HandlerResult<Vec<Task>> {
+    async fn get(&self, ids: Vec<u32>) -> HandlerResult<HashMap<u32, Task>> {
         let state = self.state.lock();
-        let mut tasks = Vec::new();
+        let mut tasks = HashMap::new();
         for id in ids {
             if let Some(task) = state.tasks.get(&id) {
-                tasks.push(task.clone());
+                tasks.insert(id, task.clone());
             }
         }
         Ok(tasks)
     }
-    async fn get_all(&self) -> HandlerResult<Vec<Task>> {
+    async fn get_all(&self) -> HandlerResult<HashMap<u32, Task>> {
         let state = self.state.lock();
-        let mut tasks = Vec::new();
-        for task in state.tasks.values() {
-            tasks.push(task.clone());
-        }
-        Ok(tasks)
+        Ok(state.tasks.clone())
     }
     async fn delete(&self, ids: Vec<u32>) -> HandlerResult<()> {
         let mut state = self.state.lock();
@@ -146,6 +145,19 @@ impl Todo for Handler {
     async fn delete_all(&self) -> HandlerResult<()> {
         let mut state = self.state.lock();
         state.tasks.clear();
+        Ok(())
+    }
+    async fn delete_done_tasks(&self) -> HandlerResult<()> {
+        let mut state = self.state.lock();
+        let mut ids = Vec::new();
+        for (id, task) in state.tasks.iter() {
+            if let TaskStatus::Done = task.status {
+                ids.push(*id);
+            }
+        }
+        for id in ids {
+            state.tasks.remove(&id);
+        }
         Ok(())
     }
 }
