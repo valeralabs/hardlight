@@ -1,7 +1,9 @@
 [package]
 name = "hardlight-macros"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+license = "MIT"
+description = "A collection of procedural macros for the Hardlight RPC framework."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

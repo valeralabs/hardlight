@@ -1,0 +1,19 @@
+use hardlight::*;
+
+#[rpc]
+pub trait Counter {
+    async fn increment(&self, amount: u32) -> HandlerResult<u32>;
+    async fn decrement(&self, amount: u32) -> HandlerResult<u32>;
+    // We'll deprecate this at some point as we can just send it using Events
+    async fn get(&self) -> HandlerResult<u32>;
+}
+
+#[connection_state]
+pub struct State {
+    pub counter: u32,
+}
+
+// enum Events {
+//     Increment(u32),
+//     Decrement(u32),
+// }

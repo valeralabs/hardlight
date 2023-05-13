@@ -3,6 +3,11 @@ use std::sync::Arc;
 use tokio::time::{sleep, Duration, Instant};
 use tracing::info;
 
+use crate::service::{Counter, CounterClient, CounterServer};
+
+mod handler;
+mod service;
+
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
     tracing_subscriber::fmt::init();
@@ -72,44 +77,4 @@ async fn main() -> Result<(), std::io::Error> {
     assert!(final_value == first_value + (num_tasks * num_increments_per_task));
 
     Ok(())
-}
-
-#[rpc]
-trait Counter {
-    async fn increment(&self, amount: u32) -> HandlerResult<u32>;
-    async fn decrement(&self, amount: u32) -> HandlerResult<u32>;
-    // We'll deprecate this at some point as we can just send it using Events
-    async fn get(&self) -> HandlerResult<u32>;
-}
-
-#[connection_state]
-struct State {
-    counter: u32,
-}
-
-// enum Events {
-//     Increment(u32),
-//     Decrement(u32),
-// }
-
-#[rpc_handler]
-impl Counter for Handler {
-    async fn increment(&self, amount: u32) -> HandlerResult<u32> {
-        // lock the state to the current thread
-        let mut state: StateGuard = self.state.lock();
-        state.counter += amount;
-        Ok(state.counter)
-    } // state is automatically unlocked here; any changes are sent to the client
-      // automagically ✨
-
-    async fn decrement(&self, amount: u32) -> HandlerResult<u32> {
-        let mut state = self.state.lock();
-        state.counter -= amount;
-        Ok(state.counter)
-    }
-
-    async fn get(&self) -> HandlerResult<u32> {
-        let state = self.state.lock();
-        Ok(state.counter)
-    }
 }
