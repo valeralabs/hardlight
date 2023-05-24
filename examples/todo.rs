@@ -66,12 +66,19 @@ async fn print_tasks(client: &TodoClient) {
 /// These RPC methods are executed on the server and can be called by clients.
 #[rpc]
 trait Todo {
+    /// Create a new task and return its ID.
     async fn create(&self, task: Task) -> HandlerResult<u32>;
+    /// Mark the task with the given ID as done.
     async fn mark_as_done(&self, id: Vec<u32>) -> HandlerResult<()>;
+    /// Get tasks with the given IDs.
     async fn get(&self, ids: Vec<u32>) -> HandlerResult<HashMap<u32, Task>>;
+    /// Get all tasks.
     async fn get_all(&self) -> HandlerResult<HashMap<u32, Task>>;
+    /// Delete tasks with the given IDs.
     async fn delete(&self, ids: Vec<u32>) -> HandlerResult<()>;
+    /// Delete all tasks.
     async fn delete_all(&self) -> HandlerResult<()>;
+    /// Delete all done tasks.
     async fn delete_done_tasks(&self) -> HandlerResult<()>;
 }
 

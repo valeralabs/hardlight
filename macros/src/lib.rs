@@ -372,6 +372,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 let method_ident = &method.sig.ident;
                 let method_inputs = &method.sig.inputs;
                 let method_output = &method.sig.output;
+                let attr = &method.attrs;
 
                 let rpc_call_variant = {
                     let s = method_ident.to_string();
@@ -387,6 +388,7 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                     .collect::<Vec<_>>();
 
                 let client_method = quote! {
+                    #(#attr)*
                     async fn #method_ident(#method_inputs) #method_output {
                         match self.make_rpc_call(RpcCall::#rpc_call_variant { #(#rpc_call_params),* }).await {
                             Ok(c) => rkyv::from_bytes(&c)
