@@ -122,15 +122,13 @@ fn snake_to_pascal_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut capitalize_next = true;
 
-    s.chars().for_each(|c| {
-        match c {
-            '_' => capitalize_next = true,
-            _ if capitalize_next => {
-                result.extend(c.to_uppercase());
-                capitalize_next = false;
-            }
-            _ => result.push(c),
+    s.chars().for_each(|c| match c {
+        '_' => capitalize_next = true,
+        _ if capitalize_next => {
+            result.extend(c.to_uppercase());
+            capitalize_next = false;
         }
+        _ => result.push(c),
     });
 
     result
@@ -409,26 +407,29 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 self_signed: bool,
                 shutdown: Option<tokio::sync::oneshot::Sender<()>>,
                 rpc_tx: Option<tokio::sync::mpsc::Sender<(Vec<u8>, RpcResponseSender)>>,
+                compression: bool,
             }
 
             #[async_trait::async_trait]
             impl ApplicationClient for #client_name {
-                fn new_self_signed(host: &str) -> Self {
+                fn new_self_signed(host: &str, compression: bool) -> Self {
                     Self {
                         host: host.to_string(),
                         self_signed: true,
                         shutdown: None,
                         rpc_tx: None,
+                        compression,
                     }
                 }
 
                 #[allow(dead_code)]
-                fn new(host: &str) -> Self {
+                fn new(host: &str, compression: bool) -> Self {
                     Self {
                         host: host.to_string(),
                         self_signed: false,
                         shutdown: None,
                         rpc_tx: None,
+                        compression,
                     }
                 }
 
@@ -441,12 +442,13 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
 
                     let self_signed = self.self_signed;
                     let host = self.host.clone();
+                    let compression = self.compression;
 
                     tokio::spawn(async move {
                         let mut client: Client<State> = if self_signed {
-                            Client::new_self_signed(&host)
+                            Client::new_self_signed(&host, compression)
                         } else {
-                            Client::new(&host)
+                            Client::new(&host, compression)
                         };
 
                         if let Err(e) =

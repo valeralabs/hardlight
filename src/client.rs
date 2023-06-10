@@ -27,7 +27,7 @@ use version::Version;
 
 use crate::{
     server::{HandlerResult, HL_VERSION},
-    wire::{ClientMessage, RpcHandlerError, ServerMessage},
+    wire::{ClientMessage, RpcHandlerError, ServerMessage}, deflate, inflate,
 };
 
 use array_init::array_init;
@@ -35,6 +35,7 @@ use array_init::array_init;
 pub struct ClientConfig {
     tls: TLSClientConfig,
     host: String,
+    compression: bool,
 }
 
 pub trait ClientState {
@@ -46,8 +47,8 @@ pub trait ClientState {
 
 #[async_trait]
 pub trait ApplicationClient {
-    fn new_self_signed(host: &str) -> Self;
-    fn new(host: &str) -> Self;
+    fn new_self_signed(host: &str, compression: bool) -> Self;
+    fn new(host: &str, compression: bool) -> Self;
     async fn connect(&mut self) -> Result<(), tungstenite::Error>;
     fn disconnect(&mut self);
 }
@@ -72,7 +73,7 @@ where
     T: ClientState + Default + Debug,
 {
     /// Creates a new client that doesn't verify the server's certificate.
-    pub fn new_self_signed(host: &str) -> Self {
+    pub fn new_self_signed(host: &str, compression: bool) -> Self {
         let tls = TLSClientConfig::builder()
             .with_safe_defaults()
             .with_custom_certificate_verifier(Arc::new(
@@ -82,12 +83,13 @@ where
         let config = ClientConfig {
             tls,
             host: host.to_string(),
+            compression,
         };
         Self::new_with_config(config)
     }
 
     /// Create a new client using the system's root certificates.
-    pub fn new(host: &str) -> Self {
+    pub fn new(host: &str, compression: bool) -> Self {
         let mut root_store = RootCertStore::empty();
         for cert in load_native_certs().unwrap() {
             root_store.add(&Certificate(cert.0)).unwrap();
@@ -99,6 +101,7 @@ where
         let config = ClientConfig {
             tls,
             host: host.to_string(),
+            compression,
         };
         Self::new_with_config(config)
     }
@@ -134,7 +137,21 @@ where
         async move {
             let connector = Connector::Rustls(Arc::new(self.config.tls.clone()));
 
-            let req = Request::builder().method("GET").header("Host", self.config.host.clone()).header("Connection", "Upgrade").header("Upgrade", "websocket").header("Sec-WebSocket-Version", "13").header("Sec-WebSocket-Key", generate_key()).header("Sec-WebSocket-Protocol", self.hl_version_string.clone()).uri(format!("wss://{}/", self.config.host)).body(()).expect("Failed to build request");
+            let mut builder = Request::builder()
+                .method("GET")
+                .header("Host", self.config.host.clone())
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "websocket")
+                .header("Sec-WebSocket-Version", "13")
+                .header("Sec-WebSocket-Key", generate_key())
+                .header("Sec-WebSocket-Protocol", self.hl_version_string.clone())
+                .uri(format!("wss://{}/", self.config.host));
+            
+            if self.config.compression {
+                builder = builder.header("X-HL-Compress", "");
+            }
+            
+            let req = builder.body(()).unwrap();
 
             debug!("Connecting to server...");
             let (mut stream, res) = connect_async_tls_with_config(req, None, Some(connector)).await?;
@@ -172,7 +189,7 @@ where
                                 internal
                             };
 
-                            let binary = match rkyv::to_bytes::<ClientMessage, 1024>(&msg) {
+                            let mut binary = match rkyv::to_bytes::<ClientMessage, 1024>(&msg) {
                                 Ok(bytes) => bytes,
                                 Err(e) => {
                                     warn!("Failed to serialize RPC call. Ignoring. Error: {e}");
@@ -181,6 +198,18 @@ where
                                     continue
                                 }
                             }.to_vec();
+                            
+                            if self.config.compression {
+                                binary = match deflate(&binary) {
+                                    Some(bytes) => bytes,
+                                    None => {
+                                        warn!("Failed to compress RPC call. Ignoring.");
+                                        // we don't care if the receiver has dropped
+                                        let _ = completion_tx.send(Err(RpcHandlerError::BadInputBytes));
+                                        continue
+                                    }
+                                }
+                            };
 
                             debug!("Sending RPC call to server");
 
@@ -205,7 +234,16 @@ where
                     // await RPC responses from the server
                     Some(msg) = stream.next() => {
                         if let Ok(msg) = msg {
-                            if let Message::Binary(bytes) = msg {
+                            if let Message::Binary(mut bytes) = msg {
+                                if self.config.compression {
+                                    bytes = match inflate(&bytes) {
+                                        Some(bytes) => bytes,
+                                        None => {
+                                            warn!("Failed to decompress RPC response. Ignoring.");
+                                            continue
+                                        }
+                                    }
+                                };
                                 let msg: ServerMessage = match rkyv::from_bytes(&bytes) {
                                     Ok(msg) => msg,
                                     Err(e) => {

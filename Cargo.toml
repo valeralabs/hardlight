@@ -1,6 +1,6 @@
 [package]
 name = "hardlight"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "A secure, real-time, low-latency binary WebSocket RPC subprotocol. Likely the fastest web-compatible RPC framework ever built."
 authors = ["Azz <azz@valera.co>"]
@@ -27,11 +27,25 @@ tokio-macros = "2.0.0"
 parking_lot = "0.12.1"
 rkyv_derive = { version = "0.7.40", features = ["copy"] }
 
+[dependencies.flate2]
+version = "1.0.17"
+default-features = true
+
+[features]
+# uses zlib-ng instead of miniz_oxide, which is faster
+# but requires a C compiler, so can be a pain to ship in unusual
+# environments
+unpure-compression = ["flate2/zlib-ng"]
+noisy = ["tracing/max_level_debug"]
+# by default, we disable most tracing for performance reasons
+default = ["tracing/release_max_level_info"]
+
 [workspace]
 members = [
     ".",
     "testing-project",
     "macros",
+    "hello-world"
 ]
 
 [dev-dependencies]

@@ -9,7 +9,7 @@ async fn main() {
     let mut server = TodoServer::new(config);
     server.start().await.unwrap();
 
-    let mut client = TodoClient::new_self_signed("localhost:8080");
+    let mut client = TodoClient::new_self_signed("localhost:8080", true);
     client.connect().await.unwrap();
 
     let tasks_to_create = vec![

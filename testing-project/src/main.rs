@@ -20,7 +20,7 @@ async fn main() -> Result<(), std::io::Error> {
     // wait for the server to start
     sleep(Duration::from_millis(10)).await;
 
-    let mut client = CounterClient::new_self_signed("localhost:8080");
+    let mut client = CounterClient::new_self_signed("localhost:8080", true);
     // client.add_event_handler(EventMonitor::init()).await;
     client.connect().await.unwrap();
 
@@ -34,7 +34,7 @@ async fn main() -> Result<(), std::io::Error> {
     assert!(client.get().await.unwrap() == 0);
 
     let num_tasks = 1;
-    let num_increments_per_task = 1;
+    let num_increments_per_task = 10_000;
     info!("Incrementing counter using {num_tasks} tasks with {num_increments_per_task} increments each");
     let first_value = client.get().await.expect("get failed");
     info!("First value: {}", first_value);
@@ -43,21 +43,35 @@ async fn main() -> Result<(), std::io::Error> {
 
     let start = Instant::now();
 
-    let mut tasks = Vec::new();
-    for _ in 0..num_tasks {
-        let counter = counter.clone();
-        tasks.push(tokio::spawn(async move {
-            for _ in 0..num_increments_per_task {
-                let _ = counter.increment(1).await;
-            }
-        }));
+    for _ in 0..100_000 {
+        let _ = counter.test_overhead().await;
     }
 
-    for task in tasks {
-        task.await.expect("task failed");
+    // let mut tasks = Vec::new();
+    // for _ in 0..num_tasks {
+    //     let counter = counter.clone();
+    //     tasks.push(tokio::spawn(async move {
+    //         for _ in 0..num_increments_per_task {
+    //             let start = Instant::now();
+    //             let _ = counter.test_overhead().await;
+    //             let elapsed = start.elapsed();
+    //             println!("{:?}", elapsed.as_micros());
+    //         }
+    //     }));
+    // }
+
+    // for task in tasks {
+    //     task.await.expect("task failed");
+    // }
+
+    for _ in 0..num_increments_per_task {
+        let start = Instant::now();
+        let _ = counter.test_overhead().await;
+        let elapsed = start.elapsed();
+        println!("{:?}", elapsed.as_micros())
     }
 
-    let final_value = counter.get().await.expect("get failed");
+    // let final_value = counter.get().await.expect("get failed");
 
     let elapsed = start.elapsed();
     info!(
@@ -71,10 +85,11 @@ async fn main() -> Result<(), std::io::Error> {
         elapsed / (num_tasks * num_increments_per_task)
     );
 
-    info!("Final value: {}", final_value);
+    // info!("Final value: {}", final_value);
 
     // make sure server-side mutex is working...
-    assert!(final_value == first_value + (num_tasks * num_increments_per_task));
+    // assert!(final_value == first_value + (num_tasks *
+    // num_increments_per_task));
 
     Ok(())
 }
