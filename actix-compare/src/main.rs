@@ -1,6 +1,8 @@
 use std::{fs::File, io::BufReader, time::Instant};
 
-use actix_web::{get, App, HttpResponse, HttpServer, Responder, middleware::Compress};
+use actix_web::{
+    get, middleware::Compress, App, HttpResponse, HttpServer, Responder,
+};
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, pkcs8_private_keys};
 

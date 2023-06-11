@@ -399,6 +399,42 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 client_methods.push(client_method);
             }
         }
+        
+        #[cfg(not(feature = "disable-self-signed"))]
+        let client_new = quote! {
+            fn new_self_signed(host: &str, compression: Compression) -> Self {
+                Self {
+                    host: host.to_string(),
+                    self_signed: true,
+                    shutdown: None,
+                    rpc_tx: None,
+                    compression,
+                }
+            }
+
+            fn new(host: &str, compression: Compression) -> Self {
+                Self {
+                    host: host.to_string(),
+                    self_signed: false,
+                    shutdown: None,
+                    rpc_tx: None,
+                    compression,
+                }
+            }
+        };
+        
+        #[cfg(feature = "disable-self-signed")]
+        let client_new = quote! {
+            fn new(host: &str, compression: Compression) -> Self {
+                Self {
+                    host: host.to_string(),
+                    self_signed: false,
+                    shutdown: None,
+                    rpc_tx: None,
+                    compression,
+                }
+            }
+        };
 
         quote! {
             // CLIENT CODE
@@ -407,31 +443,12 @@ pub fn rpc(args: TokenStream, input: TokenStream) -> TokenStream {
                 self_signed: bool,
                 shutdown: Option<tokio::sync::oneshot::Sender<()>>,
                 rpc_tx: Option<tokio::sync::mpsc::Sender<(Vec<u8>, RpcResponseSender)>>,
-                compression: bool,
+                compression: Compression,
             }
 
             #[async_trait::async_trait]
             impl ApplicationClient for #client_name {
-                fn new_self_signed(host: &str, compression: bool) -> Self {
-                    Self {
-                        host: host.to_string(),
-                        self_signed: true,
-                        shutdown: None,
-                        rpc_tx: None,
-                        compression,
-                    }
-                }
-
-                #[allow(dead_code)]
-                fn new(host: &str, compression: bool) -> Self {
-                    Self {
-                        host: host.to_string(),
-                        self_signed: false,
-                        shutdown: None,
-                        rpc_tx: None,
-                        compression,
-                    }
-                }
+                #client_new
 
                 /// Spawns a runtime client in the background to maintain the active
                 /// connection

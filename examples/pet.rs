@@ -7,7 +7,10 @@ async fn main() {
     let mut server = PetServiceServer::new(config);
     server.start().await.unwrap();
 
-    let mut client = PetServiceClient::new_self_signed("localhost:8080", true);
+    let mut client = PetServiceClient::new_self_signed(
+        "localhost:8080",
+        Compression::default(),
+    );
     client.connect().await.unwrap();
 
     client

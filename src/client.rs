@@ -1,6 +1,7 @@
 use std::{fmt::Debug, str::FromStr, sync::Arc, time::SystemTime};
 
 use async_trait::async_trait;
+use flate2::Compression;
 use futures_util::{SinkExt, StreamExt};
 use rustls_native_certs::load_native_certs;
 use tokio::{
@@ -26,8 +27,9 @@ use tracing::{debug, error, span, warn, Instrument, Level};
 use version::Version;
 
 use crate::{
+    deflate, inflate,
     server::{HandlerResult, HL_VERSION},
-    wire::{ClientMessage, RpcHandlerError, ServerMessage}, deflate, inflate,
+    wire::{ClientMessage, RpcHandlerError, ServerMessage},
 };
 
 use array_init::array_init;
@@ -35,7 +37,7 @@ use array_init::array_init;
 pub struct ClientConfig {
     tls: TLSClientConfig,
     host: String,
-    compression: bool,
+    compression: Compression,
 }
 
 pub trait ClientState {
@@ -47,8 +49,9 @@ pub trait ClientState {
 
 #[async_trait]
 pub trait ApplicationClient {
-    fn new_self_signed(host: &str, compression: bool) -> Self;
-    fn new(host: &str, compression: bool) -> Self;
+    #[cfg(not(feature = "disable-self-signed"))]
+    fn new_self_signed(host: &str, compression: Compression) -> Self;
+    fn new(host: &str, compression: Compression) -> Self;
     async fn connect(&mut self) -> Result<(), tungstenite::Error>;
     fn disconnect(&mut self);
 }
@@ -73,7 +76,7 @@ where
     T: ClientState + Default + Debug,
 {
     /// Creates a new client that doesn't verify the server's certificate.
-    pub fn new_self_signed(host: &str, compression: bool) -> Self {
+    pub fn new_self_signed(host: &str, compression: Compression) -> Self {
         let tls = TLSClientConfig::builder()
             .with_safe_defaults()
             .with_custom_certificate_verifier(Arc::new(
@@ -89,7 +92,7 @@ where
     }
 
     /// Create a new client using the system's root certificates.
-    pub fn new(host: &str, compression: bool) -> Self {
+    pub fn new(host: &str, compression: Compression) -> Self {
         let mut root_store = RootCertStore::empty();
         for cert in load_native_certs().unwrap() {
             root_store.add(&Certificate(cert.0)).unwrap();
@@ -137,31 +140,38 @@ where
         async move {
             let connector = Connector::Rustls(Arc::new(self.config.tls.clone()));
 
-            let mut builder = Request::builder()
-                .method("GET")
-                .header("Host", self.config.host.clone())
-                .header("Connection", "Upgrade")
-                .header("Upgrade", "websocket")
-                .header("Sec-WebSocket-Version", "13")
-                .header("Sec-WebSocket-Key", generate_key())
-                .header("Sec-WebSocket-Protocol", self.hl_version_string.clone())
-                .uri(format!("wss://{}/", self.config.host));
-            
-            if self.config.compression {
-                builder = builder.header("X-HL-Compress", "");
-            }
-            
-            let req = builder.body(()).unwrap();
+            let req = Request::builder().method("GET").header("Host", self.config.host.clone()).header("Connection", "Upgrade").header("Upgrade", "websocket").header("Sec-WebSocket-Version", "13").header("Sec-WebSocket-Key", generate_key()).header("Sec-WebSocket-Protocol", self.hl_version_string.clone()).header("X-HL-Compress", self.config.compression.level()).uri(format!("wss://{}/", self.config.host)).body(()).unwrap();
 
             debug!("Connecting to server...");
             let (mut stream, res) = connect_async_tls_with_config(req, None, Some(connector)).await?;
 
-            let protocol = res.headers().get("Sec-WebSocket-Protocol");
-            if protocol.is_none() || protocol.unwrap() != &self.hl_version_string {
-                error!("Received bad version from server. Wanted {:?}, got {:?}", self.hl_version_string, protocol);
-                return Err(Error::Protocol(ProtocolError::HandshakeIncomplete));
-            } else {
-                debug!("HardLight connection established ({})", protocol.unwrap().to_str().unwrap());
+            let headers = res.headers();
+
+            match headers.get("Sec-WebSocket-Protocol") {
+                Some(protocol) if protocol == &self.hl_version_string => {
+                    let compression = headers.get("X-HL-Compress")
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|n| n.parse::<u32>().ok())
+                        .filter(|&c| c <= 9)
+                        .map(|c| Compression::new(c));
+
+                    debug!(
+                        "HardLight connection established [{}, compression {}]",
+                        protocol.to_str().unwrap(),
+                        match compression {
+                            Some(c) => format!("explicit {}", c.level()),
+                            None => format!("implicit {}", self.config.compression.level()),
+                        }
+                    );
+                }
+                Some(protocol) => {
+                    error!("Received bad version from server. Wanted {:?}, got {:?}", self.hl_version_string, protocol);
+                    return Err(Error::Protocol(ProtocolError::HandshakeIncomplete));
+                }
+                None => {
+                    error!("Received bad version from server. Wanted {:?}, got None", self.hl_version_string);
+                    return Err(Error::Protocol(ProtocolError::HandshakeIncomplete));
+                }
             }
 
             debug!("Sending control channels to application...");
@@ -198,16 +208,14 @@ where
                                     continue
                                 }
                             }.to_vec();
-                            
-                            if self.config.compression {
-                                binary = match deflate(&binary) {
-                                    Some(bytes) => bytes,
-                                    None => {
-                                        warn!("Failed to compress RPC call. Ignoring.");
-                                        // we don't care if the receiver has dropped
-                                        let _ = completion_tx.send(Err(RpcHandlerError::BadInputBytes));
-                                        continue
-                                    }
+
+                            binary = match deflate(&binary, self.config.compression) {
+                                Some(bytes) => bytes,
+                                None => {
+                                    warn!("Failed to compress RPC call. Ignoring.");
+                                    // we don't care if the receiver has dropped
+                                    let _ = completion_tx.send(Err(RpcHandlerError::BadInputBytes));
+                                    continue
                                 }
                             };
 
@@ -235,13 +243,11 @@ where
                     Some(msg) = stream.next() => {
                         if let Ok(msg) = msg {
                             if let Message::Binary(mut bytes) = msg {
-                                if self.config.compression {
-                                    bytes = match inflate(&bytes) {
-                                        Some(bytes) => bytes,
-                                        None => {
-                                            warn!("Failed to decompress RPC response. Ignoring.");
-                                            continue
-                                        }
+                                bytes = match inflate(&bytes) {
+                                    Some(bytes) => bytes,
+                                    None => {
+                                        warn!("Failed to decompress RPC response. Ignoring.");
+                                        continue
                                     }
                                 };
                                 let msg: ServerMessage = match rkyv::from_bytes(&bytes) {

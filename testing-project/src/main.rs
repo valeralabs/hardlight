@@ -24,34 +24,25 @@ async fn main() -> Result<(), std::io::Error> {
 
     // wait for the server to start
     sleep(Duration::from_millis(10)).await;
-
-    let mut client = CounterClient::new_self_signed("localhost:8080", false);
-    // client.add_event_handler(EventMonitor::init()).await;
-    client.connect().await.unwrap();
-
-    let _ = client.increment(1).await;
-
-    client.disconnect(); // demonstrate that we can disconnect and reconnect
-    server.stop();
-    server.start().await.unwrap();
-    client.connect().await.unwrap(); // note: state is reset as we're using a new connection
-
-    assert!(client.get().await.unwrap() == 0);
-
-    let num_clients = 4;
+    
+    let num_clients = 10;
     let tasks_per_client = 2;
     let invocs_per_task = 25_000;
-    info!("Incrementing counter using {tasks_per_client} tasks with {invocs_per_task} increments each");
-    let first_value = client.get().await.expect("get failed");
-    info!("First value: {}", first_value);
+    let compression = Compression::best();
+    info!(
+        "Running {} clients, {} tasks per client, {} invocations per task",
+        num_clients, tasks_per_client, invocs_per_task
+    );
 
     let (send, mut recv) = mpsc::unbounded_channel();
 
     for _ in 0..num_clients {
         let sender = send.clone();
         tokio::spawn(async move {
-            let mut client =
-                CounterClient::new_self_signed("localhost:8080", true);
+            let mut client = CounterClient::new_self_signed(
+                "localhost:8080",
+                compression,
+            );
             client.connect().await.unwrap();
             let client = Arc::new(client);
             let mut tasks = Vec::new();
@@ -62,8 +53,7 @@ async fn main() -> Result<(), std::io::Error> {
                     for _ in 0..invocs_per_task {
                         let start = Instant::now();
                         let _ = client.test_overhead().await;
-                        let _ = sender.send(start.elapsed()); // notify the
-                                                              // monitor task
+                        let _ = sender.send(start.elapsed());
                     }
                 }));
             }
@@ -80,28 +70,23 @@ async fn main() -> Result<(), std::io::Error> {
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} {per_sec} ({eta}) {msg}")
                 .unwrap()
-                .progress_chars("#>-"),
+                .progress_chars("#>-")
         );
 
     loop {
-        // use timeout to avoid blocking forever
-        let elapsed =
-            match timeout(Duration::from_millis(10), recv.recv()).await {
-                Ok(elapsed) => elapsed,
-                Err(_) => break,
-            };
-
-        bar.inc(1);
-
-        if let Some(elapsed) = elapsed {
-            timings.push(elapsed);
-        }
+        match timeout(Duration::from_millis(10), recv.recv()).await.ok().flatten() {
+            Some(elapsed) => {
+                timings.push(elapsed);
+                bar.inc(1);
+            }
+            None => break,
+        };
     }
 
     bar.finish_with_message("done");
 
     plot_line_graph(&timings);
-    
+
     timings.sort();
     let sum: u128 = timings.iter().map(|t| t.as_micros()).sum();
     let avg = sum / timings.len() as u128;
@@ -134,10 +119,7 @@ fn plot_percentile_graph(timings: &Vec<Duration>) {
         .x_label_area_size(30)
         .y_label_area_size(30)
         // use 99.99th percentile as max
-        .build_cartesian_2d(
-            0u128..100u128,
-            0u128..1000u128,
-        )
+        .build_cartesian_2d(0u128..100u128, 0u128..1000u128)
         .unwrap();
     chart
         .configure_mesh()
@@ -160,6 +142,7 @@ fn plot_percentile_graph(timings: &Vec<Duration>) {
         .draw()
         .unwrap();
     root.present().unwrap();
+    info!("Percentile graph generated at ./percentile.svg")
 }
 
 fn plot_line_graph(timings: &Vec<Duration>) {
@@ -174,7 +157,7 @@ fn plot_line_graph(timings: &Vec<Duration>) {
         // use largest value + 10 as upper bound for y axis
         .build_cartesian_2d(
             0u128..timings.len() as u128,
-            0u128..timings.iter().max().unwrap().as_micros()
+            0u128..timings.iter().max().unwrap().as_micros(),
         )
         .unwrap();
     chart
@@ -195,7 +178,7 @@ fn plot_line_graph(timings: &Vec<Duration>) {
         .unwrap()
         .label("Line")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
-    
+
     // draw average line
     let sum: u128 = timings.iter().map(|t| t.as_micros()).sum();
     let avg = sum / timings.len() as u128;
@@ -205,20 +188,26 @@ fn plot_line_graph(timings: &Vec<Duration>) {
         .unwrap()
         .label("Average")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
-    
+
     // add standard deviation (+/-)
     let std_dev = standard_deviation(timings);
-    let std_dev_line = [(0, avg - std_dev as u128), (timings.len() as u128, avg - std_dev as u128)];
+    let std_dev_line = [
+        (0, avg - std_dev as u128),
+        (timings.len() as u128, avg - std_dev as u128),
+    ];
     chart
         .draw_series(LineSeries::new(std_dev_line, &BLACK))
         .unwrap()
         .label("Standard Deviation")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLACK));
-    let std_dev_line = [(0, avg + std_dev as u128), (timings.len() as u128, avg + std_dev as u128)];
+    let std_dev_line = [
+        (0, avg + std_dev as u128),
+        (timings.len() as u128, avg + std_dev as u128),
+    ];
     chart
         .draw_series(LineSeries::new(std_dev_line, &BLACK))
         .unwrap();
-    
+
     chart
         .configure_series_labels()
         .background_style(&WHITE.mix(0.8))
@@ -226,6 +215,7 @@ fn plot_line_graph(timings: &Vec<Duration>) {
         .draw()
         .unwrap();
     root.present().unwrap();
+    info!("Line graph generated at ./line.svg")
 }
 
 fn standard_deviation(timings: &Vec<Duration>) -> f64 {
