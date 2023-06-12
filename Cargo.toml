@@ -1,6 +1,6 @@
 [package]
 name = "hardlight"
-version = "0.1.2"
+version = "1.0.0"
 edition = "2021"
 description = "A secure, real-time, low-latency binary WebSocket RPC subprotocol. Likely the fastest web-compatible RPC framework ever built."
 authors = ["Azz <azz@valera.co>"]
@@ -21,17 +21,35 @@ rcgen = { version = "0.10.0", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tracing = "0.1.37"
 rustls-native-certs = "0.6.2"
-hardlight-macros = { path = "macros", version = "0.1.2" }
+hardlight-macros = { path = "macros", version = "1.0.0" }
 array-init = "2.0"
 tokio-macros = "2.0.0"
 parking_lot = "0.12.1"
 rkyv_derive = { version = "0.7.40", features = ["copy"] }
+
+[dependencies.flate2]
+version = "1.0.17"
+default-features = true
+
+[features]
+# uses zlib-ng instead of miniz_oxide, which is faster
+# but requires a C compiler, so can be a pain to ship in unusual
+# environments
+unpure-compression = ["flate2/zlib-ng"]
+# disables most tracing in release mode
+quiet = ["tracing/release_max_level_info"]
+# enables all tracing 
+noisy = ["tracing/max_level_trace"]
+# disables any self-signed features, forcing the use of a CA
+disable-self-signed = ["hardlight-macros/disable-self-signed"]
+default = ["quiet"]
 
 [workspace]
 members = [
     ".",
     "testing-project",
     "macros",
+    "actix-compare"
 ]
 
 [dev-dependencies]

@@ -1,6 +1,7 @@
 use std::{io, net::SocketAddr, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
+use flate2::Compression;
 use futures_util::{SinkExt, StreamExt};
 use rcgen::generate_simple_self_signed;
 use tokio::{
@@ -23,7 +24,10 @@ use tokio_tungstenite::{
 use tracing::{debug, info, span, warn, Instrument, Level};
 use version::{version, Version};
 
-use crate::wire::{ClientMessage, RpcHandlerError, ServerMessage};
+use crate::{
+    deflate, inflate,
+    wire::{ClientMessage, RpcHandlerError, ServerMessage},
+};
 
 /// A tokio MPSC channel that is used to send state updates to the runtime.
 /// The runtime will then send these updates to the client.
@@ -65,6 +69,7 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    #[cfg(not(feature = "disable-self-signed"))]
     pub fn new_self_signed(host: &str) -> Self {
         Self::new(host, {
             let cert = generate_simple_self_signed(vec![host.into()]).unwrap();
@@ -171,20 +176,39 @@ where
 
                 debug!("Successfully terminated TLS handshake");
 
+                let mut compression = Compression::default();
+
                 let callback = |req: &Request, mut response: Response| {
-                    // request is only valid if req.headers().get("Sec-WebSocket-Protocol") is
-                    // Some(req_version) AND req_version == version
-                    let req_version = req.headers().get("Sec-WebSocket-Protocol");
-                    if req_version.is_none() || req_version.unwrap() != &version {
-                        *response.status_mut() = StatusCode::BAD_REQUEST;
-                        warn!("Invalid request from {}, version mismatch (client gave {:?}, server wanted {:?})", peer_addr, req_version, Some(version));
-                        return Ok(response);
-                    } else {
-                        let headers = response.headers_mut();
-                        headers.append("Sec-WebSocket-Protocol", version);
-                        debug!("Received valid handshake, upgrading connection to HardLight ({})", req_version.unwrap().to_str().unwrap());
-                        Ok(response)
+                    match req.headers().get("Sec-WebSocket-Protocol") {
+                        Some(req_version) if req_version == &version => {
+                            response.headers_mut().append("Sec-WebSocket-Protocol", version);
+                            debug!("Received valid handshake, upgrading connection to HardLight ({})", req_version.to_str().unwrap());
+                        }
+                        Some(req_version) => {
+                            *response.status_mut() = StatusCode::BAD_REQUEST;
+                            warn!("Invalid request from {}, version mismatch (client gave {:?}, server wanted {:?})", peer_addr, req_version, Some(version));
+                        }
+                        None => {
+                            *response.status_mut() = StatusCode::BAD_REQUEST;
+                            warn!("Invalid request from {}, no version specified", peer_addr);
+                        }
                     }
+
+                    compression = req
+                        .headers()
+                        .get("X-HL-Compress")
+                        .and_then(|c| c.to_str().ok())
+                        .and_then(|c| c.parse::<u8>().ok())
+                        .filter(|&c| c <= 9)
+                        .map(|c| {
+                            debug!("Accepted client specified compression level {}", c);
+                            Compression::new(c as u32)
+                        })
+                        .unwrap_or(Compression::default());
+
+                    response.headers_mut().append("X-HL-Compress", compression.level().into());
+
+                    Ok(response)
                 };
 
                 let mut ws_stream = match accept_hdr_async(stream, callback).await {
@@ -204,6 +228,8 @@ where
 
                 let handler = Arc::new(handler);
 
+                let compression = Arc::new(compression);
+
                 debug!("Starting RPC handler loop");
                 loop {
                     select! {
@@ -217,8 +243,21 @@ where
                                 }
                             };
                             if msg.is_binary() {
-                                let binary = msg.into_data();
-                                let msg: ClientMessage = rkyv::from_bytes(&binary).unwrap();
+                                let binary = match inflate(&msg.into_data()) {
+                                    Some(binary) => binary,
+                                    None => {
+                                        warn!("Error decompressing message from client");
+                                        continue;
+                                    },
+                                };
+
+                                let msg = match rkyv::from_bytes::<ClientMessage>(&binary) {
+                                    Ok(msg) => msg,
+                                    Err(e) => {
+                                        warn!("Error deserializing message from client: {}", e);
+                                        continue;
+                                    }
+                                };
 
                                 match msg {
                                     ClientMessage::RPCRequest { id, internal } => {
@@ -255,11 +294,30 @@ where
                                 ServerMessage::RPCResponse { id, .. } => id,
                                 _ => unreachable!(),
                             };
+
                             let span = span!(Level::DEBUG, "rpc", id = id);
                             let _enter = span.enter();
+
                             in_flight[id as usize] = false;
+
                             debug!("RPC call finished. Serializing and sending response...");
-                            let binary = rkyv::to_bytes::<ServerMessage, 1024>(&msg).unwrap().to_vec();
+
+                            let encoded = match rkyv::to_bytes::<ServerMessage, 1024>(&msg) {
+                                Ok(encoded) => encoded,
+                                Err(e) => {
+                                    warn!("Error serializing response: {}", e);
+                                    continue;
+                                }
+                            };
+
+                            let binary = match deflate(encoded.as_ref(), *compression) {
+                                Some(compressed) => compressed,
+                                None => {
+                                    warn!("Error compressing response");
+                                    continue;
+                                },
+                            };
+
                             match ws_stream.send(Message::Binary(binary)).await {
                                 Ok(_) => debug!("Response sent."),
                                 Err(e) => {
@@ -272,8 +330,25 @@ where
                         Some(state_changes) = state_change_rx.recv() => {
                             let span = span!(Level::DEBUG, "state_change");
                             let _enter = span.enter();
+
                             debug!("Received {} state update(s) from application. Serializing and sending...", state_changes.len());
-                            let binary = rkyv::to_bytes::<ServerMessage, 1024>(&ServerMessage::StateChange(state_changes)).unwrap().to_vec();
+
+                            let encoded = match rkyv::to_bytes::<ServerMessage, 1024>(&ServerMessage::StateChange(state_changes)) {
+                                Ok(encoded) => encoded,
+                                Err(e) => {
+                                    warn!("Error serializing state update: {}", e);
+                                    continue;
+                                }
+                            };
+
+                            let binary = match deflate(encoded.as_ref(), *compression) {
+                                Some(compressed) => compressed,
+                                None => {
+                                    warn!("Error compressing state update");
+                                    continue;
+                                },
+                            };
+
                             match ws_stream.send(Message::Binary(binary)).await {
                                 Ok(_) => debug!("State update sent."),
                                 Err(e) => {

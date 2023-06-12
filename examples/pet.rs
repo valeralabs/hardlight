@@ -7,7 +7,10 @@ async fn main() {
     let mut server = PetServiceServer::new(config);
     server.start().await.unwrap();
 
-    let mut client = PetServiceClient::new_self_signed("localhost:8080");
+    let mut client = PetServiceClient::new_self_signed(
+        "localhost:8080",
+        Compression::default(),
+    );
     client.connect().await.unwrap();
 
     client
@@ -104,7 +107,7 @@ impl Dog {
     }
 
     fn bark(&self) -> String {
-        format!("{} says woof!", self.name)
+        "woof!".to_owned()
     }
 }
 
@@ -121,6 +124,6 @@ impl Cat {
     }
 
     fn meow(&self) -> String {
-        format!("{} says meow!", self.name)
+        "meow!".to_owned()
     }
 }

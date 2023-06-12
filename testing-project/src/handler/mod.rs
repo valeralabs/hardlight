@@ -20,4 +20,8 @@ impl Counter for Handler {
     async fn get(&self) -> HandlerResult<u32> {
         get(self).await
     }
+
+    async fn test_overhead(&self) -> HandlerResult<()> {
+        Ok(())
+    }
 }
